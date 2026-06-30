@@ -1,0 +1,24 @@
+# SQLite local DB + backups
+*.db
+*.db.bak*
+
+# Generated feed export (pipeline output; sample is committed instead)
+papers.json
+site/papers.json
+
+# Secrets / env
+.env
+*.dpapi
+
+# Training artifacts (local)
+training_log.jsonl
+training_runs.log
+interest_model.json.bak*
+
+# Python
+__pycache__/
+.venv/
+venv/
+
+# Wrangler
+.wrangler/
