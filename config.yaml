@@ -70,6 +70,11 @@ feeds:
     type: pubmed_search
     name: "J Esthet Restor Dent"
     term: '"J Esthet Restor Dent"[ta]'
+  - key: jpd
+    group: esthetic
+    type: pubmed_search
+    name: "J Prosthet Dent"
+    term: '"J Prosthet Dent"[ta]'
 
   # ---- 主題型 PubMed search（補充期刊涵蓋不到的主題）----
   - key: perio_sr
