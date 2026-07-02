@@ -1,0 +1,99 @@
+# paper-radar config — 牙周病／植牙／美學修復文獻雷達
+site:
+  domain: paper-radar-ting.pages.dev   # Phase 2 建好 Cloudflare Pages 後再確認實際網域
+  title: 牙科文獻學習雷達
+  private: true
+  access_email: jimmy00400@gmail.com
+
+ntfy:
+  topic: paper-radar-ting-dental       # 這兩支腳本不會用到，留給 Phase 3 的 notify_digest.py 直接沿用
+  dry_run: false
+
+enrich:
+  unpaywall:
+    enabled: true
+    email: jimmy00400@gmail.com
+  inst_sfx:
+    enabled: false   # 上游自動判定功能未完成（見 enrich.py docstring），先關閉
+    base: ""
+    sid: ""
+    fulltext_section_markers: ["全文", "Full Text"]
+    platform_labels: [Ovid, ClinicalKey, Wiley, SpringerLink, NEJM, JAMA]
+
+fulltext_tiers:
+  oa:          { badge: "🟢 OA",     fetch: host_auto }
+  institution: { badge: "🏥 機構訂閱", fetch: pc_claude_chrome }
+  paywalled:   { badge: "🔒 自取",   fetch: manual_upload }
+
+defaults:
+  limit: 20
+  new_days: 5
+
+topic_groups:
+  perio:    { label: "牙周病",   default_on: true }
+  implant:  { label: "植牙",     default_on: true }
+  esthetic: { label: "美學修復", default_on: true }
+
+feeds:
+  # ---- 牙周病期刊 ----
+  - key: jperiodontol
+    group: perio
+    type: pubmed_search
+    name: "J Periodontol"
+    term: '"J Periodontol"[ta]'
+  - key: jclinperio
+    group: perio
+    type: pubmed_search
+    name: "J Clin Periodontol"
+    term: '"J Clin Periodontol"[ta]'
+  - key: jperiodres
+    group: perio
+    type: pubmed_search
+    name: "J Periodontal Res"
+    term: '"J Periodontal Res"[ta]'
+
+  # ---- 植牙期刊 ----
+  - key: coir
+    group: implant
+    type: pubmed_search
+    name: "Clin Oral Implants Res"
+    term: '"Clin Oral Implants Res"[ta]'
+  - key: ijomi
+    group: implant
+    type: pubmed_search
+    name: "Int J Oral Maxillofac Implants"
+    term: '"Int J Oral Maxillofac Implants"[ta]'
+
+  # ---- 美學修復期刊 ----
+  - key: jerd
+    group: esthetic
+    type: pubmed_search
+    name: "J Esthet Restor Dent"
+    term: '"J Esthet Restor Dent"[ta]'
+
+  # ---- 主題型 PubMed search（補充期刊涵蓋不到的主題）----
+  - key: perio_sr
+    group: perio
+    type: pubmed_search
+    name: "Periodontitis systematic reviews"
+    term: 'periodontitis AND ("systematic review"[pt] OR "meta-analysis"[pt])'
+  - key: peri_implantitis_rct
+    group: implant
+    type: pubmed_search
+    name: "Peri-implantitis RCTs"
+    term: '"peri-implantitis"[tiab] AND randomized'
+  - key: gbr
+    group: implant
+    type: pubmed_search
+    name: "Guided bone regeneration"
+    term: '"guided bone regeneration"[tiab] OR GBR[tiab]'
+  - key: soft_tissue_implant
+    group: implant
+    type: pubmed_search
+    name: "Soft tissue augmentation implant"
+    term: '"soft tissue augmentation"[tiab] AND implant[tiab]'
+  - key: esthetic_adhesive
+    group: esthetic
+    type: pubmed_search
+    name: "Esthetic dentistry adhesive"
+    term: '"esthetic dentistry"[tiab] AND adhesive[tiab]'

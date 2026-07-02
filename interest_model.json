@@ -1,0 +1,144 @@
+{
+  "version": "1.0",
+  "updated": "2026-07-02",
+  "thresholds": {
+    "recommend": 3,
+    "candidate": 1
+  },
+  "random_picks": 2,
+  "positive": [
+    {
+      "weight": 3,
+      "tag": "peri-implantitis",
+      "keywords": ["peri-implantitis", "peri-implant disease", "peri-implant mucositis"],
+      "base_weight": 3
+    },
+    {
+      "weight": 3,
+      "tag": "guided bone regeneration",
+      "keywords": ["guided bone regeneration", "GBR", "bone augmentation", "ridge augmentation"],
+      "base_weight": 3
+    },
+    {
+      "weight": 3,
+      "tag": "periodontal regeneration",
+      "keywords": ["periodontal regeneration", "enamel matrix derivative", "EMD", "guided tissue regeneration", "GTR"],
+      "base_weight": 3
+    },
+    {
+      "weight": 2,
+      "tag": "soft tissue grafting",
+      "keywords": ["connective tissue graft", "free gingival graft", "soft tissue augmentation", "gingival recession coverage", "root coverage"],
+      "base_weight": 2
+    },
+    {
+      "weight": 2,
+      "tag": "osseointegration",
+      "keywords": ["osseointegration", "implant surface", "implant stability quotient", "ISQ"],
+      "base_weight": 2
+    },
+    {
+      "weight": 2,
+      "tag": "immediate implant",
+      "keywords": ["immediate implant placement", "immediate loading", "immediate provisionalization"],
+      "base_weight": 2
+    },
+    {
+      "weight": 2,
+      "tag": "esthetic zone",
+      "keywords": ["esthetic zone", "smile design", "pink esthetics", "papilla reconstruction"],
+      "base_weight": 2
+    },
+    {
+      "weight": 1,
+      "tag": "adhesive restoration",
+      "keywords": ["adhesive dentistry", "resin bonding", "laminate veneer", "ceramic veneer"],
+      "base_weight": 1
+    },
+    {
+      "weight": 1,
+      "tag": "digital dentistry",
+      "keywords": ["digital workflow", "CAD/CAM", "intraoral scanner", "digital smile design"],
+      "base_weight": 1
+    },
+    {
+      "weight": 2,
+      "tag": "periodontal-systemic link",
+      "keywords": ["periodontitis and diabetes", "periodontal-systemic", "periodontitis cardiovascular", "periodontal disease pregnancy outcome"],
+      "base_weight": 2
+    },
+    {
+      "weight": 1,
+      "tag": "nonsurgical periodontal therapy",
+      "keywords": ["scaling and root planing", "nonsurgical periodontal therapy", "subgingival instrumentation"],
+      "base_weight": 1
+    },
+    {
+      "weight": 1,
+      "tag": "biomaterials",
+      "keywords": ["xenograft", "allograft", "bone graft material", "collagen membrane"],
+      "base_weight": 1
+    },
+    {
+      "weight": 2,
+      "tag": "implant complications",
+      "keywords": ["implant failure", "mechanical complication", "screw loosening", "peri-implant bone loss"],
+      "base_weight": 2
+    },
+    {
+      "weight": 1,
+      "tag": "periodontal microbiome",
+      "keywords": ["periodontal pathogen", "P. gingivalis", "subgingival microbiome", "dysbiosis"],
+      "base_weight": 1
+    },
+    {
+      "weight": 2,
+      "tag": "socket preservation",
+      "keywords": ["socket preservation", "alveolar ridge preservation", "extraction socket healing"],
+      "base_weight": 2
+    }
+  ],
+  "negative": [
+    {
+      "weight": -3,
+      "tag": "basic science",
+      "keywords": ["animal model", "rat model", "mouse model", "in vitro", "cell culture", "molecular mechanism", "signaling pathway"]
+    },
+    {
+      "weight": -2,
+      "tag": "orthodontics",
+      "keywords": ["orthodontic treatment", "clear aligner", "malocclusion correction"]
+    },
+    {
+      "weight": -1,
+      "tag": "pediatric dentistry",
+      "keywords": ["primary teeth", "pediatric dental", "early childhood caries"]
+    },
+    {
+      "weight": -1,
+      "tag": "qualitative",
+      "keywords": ["qualitative study", "phenomenological", "grounded theory", "thematic analysis"]
+    },
+    {
+      "weight": -1,
+      "tag": "health economics",
+      "keywords": ["cost-effectiveness", "health economics", "insurance claims"]
+    }
+  ],
+  "negative_exceptions": {},
+  "design_bonus": {
+    "randomized controlled": 1,
+    "RCT": 1,
+    "systematic review": 1,
+    "meta-analysis": 1,
+    "guideline": 1,
+    "consensus": 1,
+    "Cochrane": 1
+  },
+  "design_penalty_context": {
+    "applies_to_tags": [],
+    "patterns": [],
+    "penalty": -1
+  },
+  "bonus_authors": []
+}
