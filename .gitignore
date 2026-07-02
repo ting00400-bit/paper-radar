@@ -22,3 +22,4 @@ venv/
 
 # Wrangler
 .wrangler/
+wrangler.toml
