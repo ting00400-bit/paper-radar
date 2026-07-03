@@ -22,7 +22,7 @@ STATE_PATH = SCRIPT_DIR / ".digest_state.json"
 NTFY_TOPIC = os.environ.get("NTFY_TOPIC", "paper-radar")
 NTFY_BASE = os.environ.get("NTFY_BASE", "https://ntfy.example.com")   # JSON 發布要 POST 到 base URL（topic 路徑會被 CF 擋 403）
 NTFY_TOKEN = os.environ.get("NTFY_TOKEN", "")
-SITE_URL = "https://paper-radar.example.com"
+SITE_URL = "https://paper-radar-3hd.pages.dev"
 
 MAX_SHOW = 12
 STATE_KEEP = 800   # state 內保留的已推 item_id 上限（防無限長）
