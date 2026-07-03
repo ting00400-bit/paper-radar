@@ -4,14 +4,12 @@
 const LS_ACT = 'pr_actions_v1';     // 各篇動作 {item_id:{vote,star,zotero,deepread}}
 const LS_TOPIC = 'pr_topics_v1';    // 主題開關 {group:bool}
 const LS_FILT = 'pr_filters_v1';    // {badge,sort,search,showSeen}
-const LS_VISIT = 'pr_visit_v1';     // {prev,last}
 const API = '/api/action';          // Worker(step 4)；失敗則純本地
 
 let DATA = null;
 let actions = load(LS_ACT, {});
 let topics = load(LS_TOPIC, null);
 let filt = load(LS_FILT, {badge:'all', sort:'score', search:'', showSeen:false});
-let visit = resolveVisit();
 let pendingSync = 0;                 // synced=0 且有實際動作的筆數（給同步 banner）
 const seenAtLoad = new Set();        // 開頁當下已 seen 的 item_id → 只有「載入前就已看」的才隱藏；本 session 新點的留著（可再點第二顆鈕）
 let headCollapsed = load('pr_headcollapse_v1', window.innerWidth < 600);
@@ -44,14 +42,11 @@ async function loadActionsFromServer(){
 }
 function save(k,v){ localStorage.setItem(k, JSON.stringify(v)); }
 
-// 回訪：跨「日」才滾動
-function resolveVisit(){
-  const today = new Date().toISOString().slice(0,10);
-  let v = load(LS_VISIT, null);
-  if(!v){ v={prev:null, last:today}; }
-  else if(v.last !== today){ v = {prev:v.last, last:today}; }
-  save(LS_VISIT, v);
-  return v;
+// 今天的日期（本地時區，非 UTC，避免半夜跨日算錯）
+function todayLocalStr(){
+  const d = new Date();
+  const tz = d.getTimezoneOffset()*60000;
+  return new Date(d - tz).toISOString().slice(0,10);
 }
 
 async function init(){
@@ -147,12 +142,12 @@ function buildTopics(){
 }
 
 function buildVisitBanner(){
-  if(!visit.prev) return;
-  const n = DATA.papers.filter(p => p.first_seen >= visit.prev && passTopic(p)).length;
-  if(!n) return;
+  const today = todayLocalStr();
+  const n = DATA.papers.filter(p => p.first_seen === today && passTopic(p)).length;
   const el = document.getElementById('visitBanner');
-  const labelOff = `✨ 自上次造訪(${visit.prev})以來新增 ${n} 篇 — 點此只看這些`;
-  const labelOn  = `✨ 只看新增 ${n} 篇中 — 點此恢復全部`;
+  if(!n){ el.classList.add('hidden'); return; }
+  const labelOff = `✨ 今天(${today})新增 ${n} 篇 — 點此只看這些`;
+  const labelOn  = `✨ 只看今天新增 ${n} 篇中 — 點此恢復全部`;
   el.textContent = filt.badge==='visit' ? labelOn : labelOff;
   el.classList.remove('hidden');
   el.onclick = () => {
@@ -194,7 +189,7 @@ function passBadge(p){
     case 'inst': return p.inst_subscribed===1;
     case 'new': return p.isNew;
     case 'unseen': return !a.seen;
-    case 'visit': return visit.prev && p.first_seen >= visit.prev;
+    case 'visit': return p.first_seen === todayLocalStr();
     default: return true;
   }
 }
