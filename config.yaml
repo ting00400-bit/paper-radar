@@ -14,9 +14,10 @@ enrich:
     enabled: true
     email: jimmy00400@gmail.com
   inst_sfx:
-    enabled: false   # 上游自動判定功能未完成（見 enrich.py docstring），先關閉
-    base: ""
-    sid: ""
+    enabled: false   # 自動判定「是否訂閱」功能未完成（見 enrich.py docstring），先關閉；
+                      # 但 base/sid 已填真實值，🔎 SFX 徽章連結本身可正常點擊使用
+    base: "https://meta.lib.cgu.edu.tw:3443/sfx_cgmh/sfx_cgmh-lnk"
+    sid: "Entrez:PubMed"
     fulltext_section_markers: ["全文", "Full Text"]
     platform_labels: [Ovid, ClinicalKey, Wiley, SpringerLink, NEJM, JAMA]
 
