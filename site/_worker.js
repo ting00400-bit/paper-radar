@@ -2,6 +2,7 @@
 //   POST /api/action        → upsert 動作到 D1 (env.DB)
 //   POST /api/upload        → 全文 PDF 存 R2 (env.PDFS) + 記 D1（含自設月配額硬擋）
 //                              radar 論文帶 ?item_id；外部論文不帶 → 自動產 manual:<ts>
+//   GET  /api/pdf?key=      → 從 R2 讀回已上傳的 PDF（key 即 D1 actions.pdf_key）
 //   GET  /api/state         → 回傳所有未同步動作（給 /paper-sync 拉）
 //   其餘                     → 靜態資源
 // 整站在 CF Access 後面，呼叫者已是本人。綁定：D1=DB, R2=PDFS。
@@ -71,6 +72,20 @@ export default {
       } catch (e) {
         return json({ error: "fail", detail: String(e) }, 500);
       }
+    }
+
+    if (url.pathname === "/api/pdf" && request.method === "GET") {
+      const key = url.searchParams.get("key") || "";
+      if (!key.startsWith("pdf/")) return json({ error: "bad key" }, 400);
+      const obj = await env.PDFS.get(key);
+      if (!obj) return json({ error: "not found" }, 404);
+      return new Response(obj.body, {
+        headers: {
+          "Content-Type": obj.httpMetadata?.contentType || "application/pdf",
+          "Content-Disposition": `inline; filename="${key.split("/").pop()}"`,
+          "Cache-Control": "private, max-age=3600",
+        },
+      });
     }
 
     if (url.pathname === "/api/state" && request.method === "GET") {

@@ -30,6 +30,7 @@ async function loadActionsFromServer(){
       if(a.seen){ e.seen = true; seenAtLoad.add(a.item_id); }
       if(a.deepread) e.deepread = true;   // 🔬 品質（沿用 deepread 欄）
       if(a.content) e.content = true;      // 📚 內容
+      if(a.pdf_key) e.pdf_key = a.pdf_key; // 📎 已上傳全文 R2 key
       if(Object.keys(e).length) map[a.item_id] = e;
       // 等待同步＝未 synced 且有實際動作（純 seen 不算）
       const actionable = a.vote || a.deepread || a.content || a.star || a.zotero || a.pdf_key;
@@ -245,6 +246,8 @@ function card(p){
     badges += `<a class="badge b-tz" href="${p.sfx_url}" target="_blank">🏥 機構訂閱${p.inst_platforms?' '+esc(p.inst_platforms):''}</a>`;
   else if(p.sfx_url)
     badges += `<a class="badge b-tag" href="${p.sfx_url}" target="_blank">🔎 SFX</a>`;
+  if(a.pdf_key)
+    badges += `<a class="badge b-tag" href="/api/pdf?key=${encodeURIComponent(a.pdf_key)}" target="_blank">📄 查看PDF</a>`;
   for(const t of (p.tags||[]).filter(t=>!/^(neg|penalty|design|author):/.test(t)).slice(0,4))
     badges += `<span class="badge b-tag">${esc(t)}</span>`;
 
@@ -261,7 +264,7 @@ function card(p){
   acts.appendChild(actBtn('😐','neutral vote',a.vote==='neutral',()=>setVote(p,'neutral')));
   acts.appendChild(actBtn('👎','down vote',a.vote==='down',()=>setVote(p,'down')));
   const upBtn = document.createElement('button');
-  upBtn.className = 'act upload'; upBtn.textContent = '📎 上傳PDF';
+  upBtn.className = 'act upload'; upBtn.textContent = a.pdf_key ? '✅ 已上傳' : '📎 上傳PDF';
   upBtn.onclick = () => uploadForPaper(p, upBtn);
   acts.appendChild(upBtn);
   body.appendChild(acts);
@@ -320,7 +323,13 @@ function uploadForPaper(p, btn){
       const r = await fetch('/api/upload?' + qs.toString(),
         { method:'POST', headers:{'Content-Type':'application/pdf'}, body: f });
       const j = await r.json();
-      btn.textContent = r.ok ? '✅ 已上傳' : `✗ ${j.error||'失敗'}`;
+      if(r.ok){
+        const a = actions[p.item_id] || (actions[p.item_id]={});
+        a.pdf_key = j.key; save(LS_ACT, actions);
+        render();
+      } else {
+        btn.textContent = `✗ ${j.error||'失敗'}`;
+      }
     }catch(e){ btn.textContent = '✗ 失敗'; }
   };
   inp.click();
