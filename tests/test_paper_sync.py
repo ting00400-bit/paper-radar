@@ -36,3 +36,7 @@ def test_note_filename():
 def test_note_filename_no_date_falls_back():
     meta = {'pub_date': '', 'first_seen': '2026-07-01', 'authors': 'Wang T', 'title': 'X'}
     assert note_filename(meta).startswith('2026-07-01 Wang - X')
+
+def test_note_filename_missing_keys_does_not_raise():
+    assert note_filename({}) == 'Unknown -.md'
+    assert note_filename({'title': 'Some Paper'}) == 'Unknown - Some Paper.md'
