@@ -38,3 +38,32 @@ def note_filename(meta):
     date = meta.get('pub_date') or meta.get('first_seen') or ''
     parts = [p for p in (date, first_author_surname(meta.get('authors', ''))) if p]
     return sanitize_filename(f"{' '.join(parts)} - {short_title(meta.get('title', ''))}") + '.md'
+
+def build_worklist(pending_rows, papers_data):
+    """D1 待辦列 × papers.json metadata → worklist。找不到 metadata（外部上傳）用 D1 的 title。"""
+    by_id = {p['item_id']: p for p in papers_data.get('papers', [])}
+    wl = []
+    for r in pending_rows:
+        meta = by_id.get(r['item_id'], {})
+        content = bool(r.get('content'))
+        deepread = bool(r.get('deepread'))
+        if not content and not deepread:
+            content = True                      # 只按筆記沒分類 → 預設內容整理
+        item = {
+            'item_id': r['item_id'],
+            'title': meta.get('title') or r.get('title') or '',
+            'authors': meta.get('authors', ''),
+            'journal': meta.get('source_name', ''),
+            'pub_date': meta.get('pub_date') or meta.get('first_seen') or '',
+            'doi': meta.get('doi') or r.get('doi') or '',
+            'tags': meta.get('tags', []),
+            'abstract': meta.get('abstract', ''),
+            'content': content,
+            'deepread': deepread,
+            'pdf_key': r.get('pdf_key'),
+            'oa_pdf_url': meta.get('oa_pdf_url'),
+        }
+        item['note_filename'] = note_filename(item)
+        item['pdf_source'] = 'r2' if item['pdf_key'] else ('oa' if item['oa_pdf_url'] else 'missing')
+        wl.append(item)
+    return wl
