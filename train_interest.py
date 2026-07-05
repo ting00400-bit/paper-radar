@@ -172,7 +172,7 @@ def main():
                 "ts": datetime.datetime.now().isoformat(timespec="seconds"),
                 "changes": [{"tag": t, "from": a, "to": b} for t, a, b in changes],
             }, ensure_ascii=False) + "\n")
-        print(f"✅ 已寫回 {MODEL_PATH.name}（備份 {bak.name}）。記得 `bash deploy.sh` 推到 Oracle 生效。")
+        print(f"✅ 已寫回 {MODEL_PATH.name}（備份 {bak.name}）。下次 fetch_and_score.py 讀本機檔案即會套用，不需部署。")
     else:
         print("（dry-run，未寫檔。加 --apply 套用）")
 
