@@ -63,9 +63,13 @@ def test_build_worklist_merges_metadata():
     assert wl[0]['content'] is True and wl[0]['deepread'] is False
     assert wl[0]['note_filename'].startswith('2026-06-28 Regidor - Paper A')
 
-def test_build_worklist_default_content_when_no_flags():
+def test_build_worklist_default_both_when_no_flags():
     wl = build_worklist(rows(content=0, deepread=0), PAPERS)
-    assert wl[0]['content'] is True   # 只按筆記沒分類 → 預設內容整理
+    assert wl[0]['content'] is True and wl[0]['deepread'] is True   # 只按筆記沒分類 → 兩段都寫
+
+def test_build_worklist_respects_explicit_content_only():
+    wl = build_worklist(rows(content=1, deepread=0), PAPERS)
+    assert wl[0]['content'] is True and wl[0]['deepread'] is False   # 明確只勾內容 → 不強加品質
 
 def test_build_worklist_unknown_item_uses_d1_title():
     wl = build_worklist(rows(item_id='manual:123', doi='', title='Uploaded paper'), PAPERS)

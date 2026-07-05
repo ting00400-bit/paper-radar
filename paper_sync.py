@@ -48,7 +48,8 @@ def build_worklist(pending_rows, papers_data):
         content = bool(r.get('content'))
         deepread = bool(r.get('deepread'))
         if not content and not deepread:
-            content = True                      # 只按筆記沒分類 → 預設內容整理
+            content = True                      # 只按筆記沒分類 → 預設兩段都寫
+            deepread = True
         item = {
             'item_id': r['item_id'],
             'title': meta.get('title') or r.get('title') or '',
