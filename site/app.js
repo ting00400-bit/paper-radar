@@ -289,7 +289,7 @@ function card(p){
   const absEl = body.querySelector('.abs');
   if(absEl) absEl.prepend(copyBtn(()=>p.abstract, '複製摘要'));
 
-  // 動作鈕：已看(左) | 品質 | 內容 | 讚/普/爛 | 上傳PDF
+  // 動作鈕：已看(左) | 品質 | 內容 | 筆記 | 讚/普/爛 | 上傳PDF
   // 品質/內容 任一顆 = /paper-sync 跑共用前置(DOI核對+Zotero+抓全文)後分流；按任一鈕都隱含標 seen
   const acts = document.createElement('div'); acts.className='acts';
   acts.appendChild(actBtn(ic('eye')+' 已看','seen',!!a.seen,()=>toggle(p,'seen')));
