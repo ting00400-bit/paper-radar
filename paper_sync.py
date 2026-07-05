@@ -69,10 +69,35 @@ def build_worklist(pending_rows, papers_data):
         wl.append(item)
     return wl
 
+def _env_val(key):
+    """只從 REPO/.env 讀單一 key（不經 shell、不外洩其他值）。找不到回 None。"""
+    envf = REPO / '.env'
+    if not envf.exists():
+        return None
+    for line in envf.read_text(encoding='utf-8').splitlines():
+        line = line.strip()
+        if line.startswith(key + '='):
+            return line.split('=', 1)[1].strip().strip('"').strip("'")
+    return None
+
+def _runner_dir():
+    """回傳一個「有 wrangler.toml、無 .env」的乾淨執行目錄，逼 wrangler 走本機 OAuth。
+    坑：repo 的 .env 存的是唯讀 token（Pages:Edit + D1:Read），新版 wrangler 會自動
+    載入 cwd 的 .env 並覆蓋 OAuth → 只能讀不能寫。在沒有 .env 的目錄執行即可回退到
+    有 D1 寫入權的 OAuth。複製 wrangler.toml 過去（而非寫死 id）以免 database_id 進 git。"""
+    d = WORK_DIR / '_wrunner'
+    d.mkdir(parents=True, exist_ok=True)
+    (d / 'wrangler.toml').write_text((REPO / 'wrangler.toml').read_text(encoding='utf-8'),
+                                     encoding='utf-8')
+    return d
+
 def _wrangler(args):
-    """在 repo 目錄跑 wrangler，OAuth 權限（剔除 .env 的唯讀 token）。回傳 stdout。"""
+    """在乾淨 runner 目錄跑 wrangler（本機 OAuth，有 D1 寫入權）。回傳 stdout。見 _runner_dir。"""
     env = {k: v for k, v in os.environ.items() if k != 'CLOUDFLARE_API_TOKEN'}
-    r = subprocess.run(['npx', '--yes', 'wrangler'] + args, cwd=REPO, env=env,
+    acct = _env_val('CLOUDFLARE_ACCOUNT_ID')
+    if acct:
+        env['CLOUDFLARE_ACCOUNT_ID'] = acct
+    r = subprocess.run(['npx', '--yes', 'wrangler'] + args, cwd=_runner_dir(), env=env,
                        capture_output=True, text=True, encoding='utf-8', shell=(os.name == 'nt'))
     if r.returncode != 0:
         raise RuntimeError(f'wrangler {" ".join(args)} failed:\n{r.stderr}')
@@ -114,10 +139,15 @@ def fetch_pdf(item):
             _wrangler(['r2', 'object', 'get', f"{R2_BUCKET}/{item['pdf_key']}",
                        '--file', str(dest), '--remote'])
         elif item['pdf_source'] == 'oa':
-            import urllib.request
+            import urllib.request, ssl
+            try:                                    # Windows 的 Python 不吃系統憑證庫，改用 certifi
+                import certifi
+                ctx = ssl.create_default_context(cafile=certifi.where())
+            except Exception:
+                ctx = ssl.create_default_context()
             req = urllib.request.Request(item['oa_pdf_url'],
                                          headers={'User-Agent': 'paper-radar-sync/1.0'})
-            with urllib.request.urlopen(req, timeout=60) as resp, open(dest, 'wb') as f:
+            with urllib.request.urlopen(req, timeout=60, context=ctx) as resp, open(dest, 'wb') as f:
                 f.write(resp.read())
         else:
             return None
