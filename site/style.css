@@ -5,6 +5,15 @@
   --oa:#15803d; --tz:#b45309; --new:#a16207; --star:#c2410c;
 }
 *{box-sizing:border-box}
+/* 全站 SVG 圖示（取代 emoji；currentColor 跟著文字色走） */
+svg.ic{width:13px;height:13px;flex:none;vertical-align:-2px}
+h1 svg.ic{width:20px;height:20px;vertical-align:-3px;color:var(--accent);margin-right:6px}
+.act svg.ic,.badge svg.ic{margin-right:6px}
+.act.up svg.ic,.act.neutral svg.ic,.act.down svg.ic{margin-right:0}  /* 純圖示投票鈕不留邊 */
+.copy svg.ic{width:12px;height:12px;display:block}
+.chip svg.ic,.up-check svg.ic{width:12px;height:12px;margin-right:5px}
+.sync-banner svg.ic,.visit-banner svg.ic,.upload summary svg.ic{margin-right:6px}
+.head-toggle svg.ic{width:14px;height:14px;display:block}
 body{margin:0;background:var(--bg);color:var(--fg);
   font-family:-apple-system,"Segoe UI","Noto Sans TC",sans-serif;font-size:15px;line-height:1.5}
 header{position:sticky;top:0;z-index:10;background:var(--bg);
@@ -63,6 +72,9 @@ main{padding:10px 12px 40px;max-width:760px;margin:0 auto}
 .card.down{opacity:.45}
 .card.seen{opacity:.55}
 .card.seen.starred,.card.seen:hover{opacity:1}
+/* 動作後延遲淡出收合（app.js 設 maxHeight 後加 .fadeout） */
+.card.fadeout{overflow:hidden;opacity:0;margin-bottom:0;padding-top:0;padding-bottom:0;border-color:transparent;
+  transition:opacity .35s ease,max-height .35s ease,margin-bottom .35s ease,padding .35s ease,border-color .35s ease}
 .c-head{display:flex;gap:8px;align-items:flex-start}
 .score{flex:none;min-width:30px;height:30px;border-radius:7px;display:flex;align-items:center;
   justify-content:center;font-weight:700;font-size:.85rem;background:#eaf4f1}
@@ -78,20 +90,35 @@ main{padding:10px 12px 40px;max-width:760px;margin:0 auto}
 .b-tz{background:#fef3c7;color:#92400e;border:1px solid #fde68a}
 .b-new{background:#fef9c3;color:#854d0e;border:1px solid #fde047}
 .b-tag{background:#eaf4f1;color:#3f6b63;border:1px solid #cfe4de}
-.abs{font-size:.82rem;color:var(--dim);margin-top:7px;display:none}
+.abs{font-size:.84rem;color:#3d5f58;margin-top:8px;display:none;line-height:1.7;
+  background:#f7fbfa;border:1px solid var(--line);border-left:3px solid var(--accent);
+  border-radius:8px;padding:9px 12px}
 .abs.show{display:block}
+.abs p{margin:0 0 7px}
+.abs p:last-child{margin-bottom:0}
+.abs strong{color:var(--fg)}
+
+/* 📋 複製鈕（標題旁／摘要內） */
+.copy{margin:0 6px 0 6px;padding:1px 7px;border-radius:8px;border:1px solid var(--line);
+  background:var(--card2);color:var(--fg);font-size:.72rem;line-height:1.4;
+  cursor:pointer;vertical-align:middle;user-select:none}
+.copy:hover{background:#ccfbf1;border-color:#5eead4}
+.abs .copy{float:right;margin:0 0 4px 8px}
 
 /* 動作鈕 */
 .acts{display:flex;gap:5px;margin-top:8px;flex-wrap:wrap}
 .act{flex:none;padding:3px 9px;border-radius:10px;border:1px solid var(--line);
   background:var(--card2);color:var(--fg);font-size:.72rem;line-height:1.3;
-  display:inline-flex;align-items:center;box-sizing:border-box;cursor:pointer}
-.act.on{background:#ccfbf1;border-color:#5eead4;color:#0f766e}
-.act.up.on{background:#dcfce7;border-color:#86efac;color:#15803d}
-.act.down.on{background:#fee2e2;border-color:#fca5a5;color:#b91c1c}
-.act.seen.on{background:#e6f2f0;border-color:#b7d9d2;color:#3f6b63}
-.act.neutral.on{background:#f5f0e6;border-color:#ddd0a8;color:#7a6a3a}
-.act.deepread.on{background:#dbeafe;border-color:#93c5fd;color:#1d4ed8}   /* 🔬 品質 */
-.act.content.on{background:#ede9fe;border-color:#c4b5fd;color:#6d28d9}    /* 📚 內容 */
+  display:inline-flex;align-items:center;box-sizing:border-box;cursor:pointer;
+  transition:transform .08s ease,background .15s ease}
+.act:active{transform:scale(.88)}
+.act.on{font-weight:700;background:#0d9488;border-color:#0f766e;color:#fff;animation:actpop .18s ease}
+@keyframes actpop{0%{transform:scale(1)}50%{transform:scale(1.15)}100%{transform:scale(1)}}
+.act.up.on{background:#16a34a;border-color:#15803d;color:#fff}
+.act.down.on{background:#dc2626;border-color:#b91c1c;color:#fff}
+.act.seen.on{background:#0d9488;border-color:#0f766e;color:#fff}
+.act.neutral.on{background:#d97706;border-color:#b45309;color:#fff}
+.act.deepread.on{background:#2563eb;border-color:#1d4ed8;color:#fff}   /* 🔬 品質 */
+.act.content.on{background:#7c3aed;border-color:#6d28d9;color:#fff}    /* 📚 內容 */
 
 footer{text-align:center;color:var(--dim);font-size:.72rem;padding:16px}

@@ -13,8 +13,34 @@ let filt = load(LS_FILT, {badge:'all', sort:'score', search:'', showSeen:false})
 let pendingSync = 0;                 // synced=0 且有實際動作的筆數（給同步 banner）
 const seenAtLoad = new Set();        // 開頁當下已 seen 的 item_id → 只有「載入前就已看」的才隱藏；本 session 新點的留著（可再點第二顆鈕）
 let headCollapsed = load('pr_headcollapse_v1', window.innerWidth < 600);
+const hideTimers = new Map();        // item_id → 動作後延遲淡出的計時器（render 時全部重置）
 
 function load(k,d){ try{return JSON.parse(localStorage.getItem(k))??d}catch{return d} }
+
+// 全站圖示（lucide 風格 24x24 線條；currentColor 跟著文字色走，emoji 跨平台長相不一的問題掰掰）
+const ICONS = {
+  check:     '<path d="M20 6 9 17l-5-5"/>',
+  x:         '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
+  eye:       '<path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8Z"/><circle cx="12" cy="12" r="3"/>',
+  microscope:'<path d="M6 18h8"/><path d="M3 22h18"/><path d="M14 22a7 7 0 1 0 0-14h-1"/><path d="M9 14h2"/><path d="M9 12a2 2 0 0 1-2-2V6h6v4a2 2 0 0 1-2 2Z"/><path d="M12 6V3a1 1 0 0 0-1-1H9a1 1 0 0 0-1 1v3"/>',
+  book:      '<path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/>',
+  thumbup:   '<path d="M7 10v12"/><path d="M15 5.88 14 10h5.83a2 2 0 0 1 1.92 2.56l-2.33 8A2 2 0 0 1 17.5 22H4a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2h2.76a2 2 0 0 0 1.79-1.11L12 2a3.13 3.13 0 0 1 3 3.88Z"/>',
+  thumbdown: '<path d="M17 14V2"/><path d="M9 18.12 10 14H4.17a2 2 0 0 1-1.92-2.56l2.33-8A2 2 0 0 1 6.5 2H20a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-2.76a2 2 0 0 0-1.79 1.11L12 22a3.13 3.13 0 0 1-3-3.88Z"/>',
+  meh:       '<circle cx="12" cy="12" r="10"/><line x1="8" x2="16" y1="15" y2="15"/><line x1="9" x2="9.01" y1="9" y2="9"/><line x1="15" x2="15.01" y1="9" y2="9"/>',
+  paperclip: '<path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/>',
+  copy:      '<rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>',
+  sparkles:  '<path d="M12 3l1.9 5.7a2 2 0 0 0 1.4 1.4L21 12l-5.7 1.9a2 2 0 0 0-1.4 1.4L12 21l-1.9-5.7a2 2 0 0 0-1.4-1.4L3 12l5.7-1.9a2 2 0 0 0 1.4-1.4Z"/>',
+  unlock:    '<rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/>',
+  building:  '<path d="M6 22V4a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v18Z"/><path d="M6 12H4a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h2"/><path d="M18 9h2a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-2"/><path d="M10 6h4"/><path d="M10 10h4"/><path d="M10 14h4"/><path d="M10 18h4"/>',
+  search:    '<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>',
+  file:      '<path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M10 9H8"/><path d="M16 13H8"/><path d="M16 17H8"/>',
+  hourglass: '<path d="M5 22h14"/><path d="M5 2h14"/><path d="M17 22v-4.172a2 2 0 0 0-.586-1.414L12 12l-4.414 4.414A2 2 0 0 0 7 17.828V22"/><path d="M7 2v4.172a2 2 0 0 0 .586 1.414L12 12l4.414-4.414A2 2 0 0 0 17 6.172V2"/>',
+  chevright: '<path d="m9 18 6-6-6-6"/>',
+  chevdown:  '<path d="m6 9 6 6 6-6"/>',
+};
+function ic(name){
+  return `<svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name]}</svg>`;
+}
 
 // 從 D1 載入動作狀態（跨瀏覽器真實來源；失敗則沿用 localStorage）
 async function loadActionsFromServer(){
@@ -78,7 +104,7 @@ function buildSyncBanner(){
   const el = document.getElementById('syncBanner');
   if(!el) return;
   if(pendingSync > 0){
-    el.textContent = `⏳ 目前 ${pendingSync} 篇等待同步 — 回 PC 對 Claude 說「論文同步」`;
+    el.innerHTML = `${ic('hourglass')} 目前 ${pendingSync} 篇等待同步 — 回 PC 對 Claude 說「論文同步」`;
     el.classList.remove('hidden');
   } else {
     el.classList.add('hidden');
@@ -101,7 +127,7 @@ function applyHeadCollapse(){
   ex.classList.toggle('hidden', headCollapsed);
   if(btn){
     btn.classList.toggle('on', !headCollapsed);
-    btn.textContent = headCollapsed ? '▶' : '▼';   // ▶ 收合 / ▼ 展開
+    btn.innerHTML = ic(headCollapsed ? 'chevright' : 'chevdown');   // ▶ 收合 / ▼ 展開
   }
 }
 
@@ -124,9 +150,9 @@ function bindUpload(){
       const r = await fetch('/api/upload?' + qs.toString(), {
         method:'POST', headers:{'Content-Type':'application/pdf'}, body: f });
       const j = await r.json();
-      msg.textContent = r.ok ? `✅ 已上傳，說「論文同步」我就處理` : `✗ ${j.error||'失敗'}`;
+      msg.innerHTML = r.ok ? `${ic('check')} 已上傳，說「論文同步」我就處理` : `${ic('x')} ${esc(j.error||'失敗')}`;
       if(r.ok){ document.getElementById('upFile').value=''; document.getElementById('upTitle').value=''; document.getElementById('upDoi').value=''; }
-    }catch(e){ msg.textContent = '✗ 上傳失敗'; }
+    }catch(e){ msg.innerHTML = `${ic('x')} 上傳失敗`; }
   };
 }
 
@@ -147,15 +173,15 @@ function buildVisitBanner(){
   const n = DATA.papers.filter(p => p.first_seen === today && passTopic(p)).length;
   const el = document.getElementById('visitBanner');
   if(!n){ el.classList.add('hidden'); return; }
-  const labelOff = `✨ 今天(${today})新增 ${n} 篇 — 點此只看這些`;
-  const labelOn  = `✨ 只看今天新增 ${n} 篇中 — 點此恢復全部`;
-  el.textContent = filt.badge==='visit' ? labelOn : labelOff;
+  const labelOff = `${ic('sparkles')} 今天(${today})新增 ${n} 篇 — 點此只看這些`;
+  const labelOn  = `${ic('sparkles')} 只看今天新增 ${n} 篇中 — 點此恢復全部`;
+  el.innerHTML = filt.badge==='visit' ? labelOn : labelOff;
   el.classList.remove('hidden');
   el.onclick = () => {
     // toggle：已在 visit 篩選 → 恢復 all；否則進 visit
     filt.badge = (filt.badge==='visit') ? 'all' : 'visit';
     save(LS_FILT,filt); syncBadgeUI();
-    el.textContent = filt.badge==='visit' ? labelOn : labelOff;
+    el.innerHTML = filt.badge==='visit' ? labelOn : labelOff;
     render();
   };
 }
@@ -211,6 +237,8 @@ function passSeen(p){
 }
 
 function render(){
+  for(const t of hideTimers.values()) clearTimeout(t);
+  hideTimers.clear();
   const list = document.getElementById('list');
   const base = DATA.papers.filter(p => passTopic(p) && passBadge(p) && passSearch(p));
   const ps = base.filter(passSeen);
@@ -239,32 +267,37 @@ function card(p){
 
   // 徽章
   let badges = '';
-  if(p.isNew) badges += `<span class="badge b-new">✨ NEW</span>`;
-  if(p.oa_pdf_url)   // 只在真的抓得到 OA PDF 時掛 🟢；標成 OA 卻下載不到的不掛假標
-    badges += `<a class="badge ${p.oaNew?'b-oanew':'b-oa'}" href="${p.oa_pdf_url}" target="_blank">${p.oaNew?'🆕🟢 新開放':'🟢 OA PDF'}</a>`;
+  if(p.isNew) badges += `<span class="badge b-new">${ic('sparkles')} NEW</span>`;
+  if(p.oa_pdf_url)   // 只在真的抓得到 OA PDF 時掛標；標成 OA 卻下載不到的不掛假標
+    badges += `<a class="badge ${p.oaNew?'b-oanew':'b-oa'}" href="${p.oa_pdf_url}" target="_blank">${ic('unlock')} ${p.oaNew?'新開放':'OA PDF'}</a>`;
   if(p.inst_subscribed===1)
-    badges += `<a class="badge b-tz" href="${p.sfx_url}" target="_blank">🏥 機構訂閱${p.inst_platforms?' '+esc(p.inst_platforms):''}</a>`;
+    badges += `<a class="badge b-tz" href="${p.sfx_url}" target="_blank">${ic('building')} 機構訂閱${p.inst_platforms?' '+esc(p.inst_platforms):''}</a>`;
   else if(p.sfx_url)
-    badges += `<a class="badge b-tag" href="${p.sfx_url}" target="_blank">🔎 SFX</a>`;
+    badges += `<a class="badge b-tag" href="${p.sfx_url}" target="_blank">${ic('search')} SFX</a>`;
   if(a.pdf_key)
-    badges += `<a class="badge b-tag" href="/api/pdf?key=${encodeURIComponent(a.pdf_key)}" target="_blank">📄 查看PDF</a>`;
+    badges += `<a class="badge b-tag" href="/api/pdf?key=${encodeURIComponent(a.pdf_key)}" target="_blank">${ic('file')} 查看PDF</a>`;
   for(const t of (p.tags||[]).filter(t=>!/^(neg|penalty|design|author):/.test(t)).slice(0,4))
     badges += `<span class="badge b-tag">${esc(t)}</span>`;
 
   body.innerHTML = title + `<div class="badges">${badges}</div>` +
-    (p.abstract?`<div class="abs" id="abs-${p.item_id}">${esc(p.abstract)}</div>`:'');
+    (p.abstract?`<div class="abs" id="abs-${p.item_id}">${formatAbs(p.abstract)}</div>`:'');
 
-  // 動作鈕：✅已看(左) | 🔬品質 | 📚內容 | 👍😐👎 | 📎PDF
-  // 🔬/📚 任一顆 = /paper-sync 跑共用前置(DOI核對+Zotero+抓全文)後分流；按任一鈕都隱含標 seen
+  // 📋 複製鈕：標題旁複製標題（貼 Google Scholar 搜全文）、摘要內複製摘要（貼 GPT 翻譯）
+  body.querySelector('.c-title').appendChild(copyBtn(()=>p.title, '複製標題'));
+  const absEl = body.querySelector('.abs');
+  if(absEl) absEl.prepend(copyBtn(()=>p.abstract, '複製摘要'));
+
+  // 動作鈕：已看(左) | 品質 | 內容 | 讚/普/爛 | 上傳PDF
+  // 品質/內容 任一顆 = /paper-sync 跑共用前置(DOI核對+Zotero+抓全文)後分流；按任一鈕都隱含標 seen
   const acts = document.createElement('div'); acts.className='acts';
-  acts.appendChild(actBtn('✅ 已看','seen',!!a.seen,()=>toggle(p,'seen')));
-  acts.appendChild(actBtn('🔬 品質','deepread',!!a.deepread,()=>toggleAct(p,'deepread')));
-  acts.appendChild(actBtn('📚 內容','content',!!a.content,()=>toggleAct(p,'content')));
-  acts.appendChild(actBtn('👍','up vote',a.vote==='up',()=>setVote(p,'up')));
-  acts.appendChild(actBtn('😐','neutral vote',a.vote==='neutral',()=>setVote(p,'neutral')));
-  acts.appendChild(actBtn('👎','down vote',a.vote==='down',()=>setVote(p,'down')));
+  acts.appendChild(actBtn(ic('eye')+' 已看','seen',!!a.seen,()=>toggle(p,'seen')));
+  acts.appendChild(actBtn(ic('microscope')+' 品質','deepread',!!a.deepread,()=>toggleAct(p,'deepread')));
+  acts.appendChild(actBtn(ic('book')+' 內容','content',!!a.content,()=>toggleAct(p,'content')));
+  acts.appendChild(actBtn(ic('thumbup'),'up vote',a.vote==='up',()=>setVote(p,'up'),'讚'));
+  acts.appendChild(actBtn(ic('meh'),'neutral vote',a.vote==='neutral',()=>setVote(p,'neutral'),'普通'));
+  acts.appendChild(actBtn(ic('thumbdown'),'down vote',a.vote==='down',()=>setVote(p,'down'),'不喜歡'));
   const upBtn = document.createElement('button');
-  upBtn.className = 'act upload'; upBtn.textContent = a.pdf_key ? '✅ 已上傳' : '📎 上傳PDF';
+  upBtn.className = 'act upload'; upBtn.innerHTML = a.pdf_key ? ic('check')+' 已上傳' : ic('paperclip')+' 上傳PDF';
   upBtn.onclick = () => uploadForPaper(p, upBtn);
   acts.appendChild(upBtn);
   body.appendChild(acts);
@@ -275,13 +308,40 @@ function card(p){
   };
 
   el.appendChild(sc); el.appendChild(body);
+
+  // 本 session 剛按過動作的卡：反灰停留 2.5 秒再淡出收合。
+  // 期間可補按第二顆鈕（每次 render 重新計時）；淡出後視同「載入前已看」，重整或勾「顯示已看過」找得回來。
+  if(!filt.showSeen && a.seen && !seenAtLoad.has(p.item_id)){
+    hideTimers.set(p.item_id, setTimeout(() => {
+      el.style.maxHeight = el.scrollHeight + 'px';
+      requestAnimationFrame(() => { el.classList.add('fadeout'); el.style.maxHeight = '0'; });
+      setTimeout(() => { seenAtLoad.add(p.item_id); render(); }, 400);
+    }, 2500));
+  }
   return el;
 }
 
-function actBtn(label, cls, on, fn){
+// 複製到剪貼簿的小鈕；點了不冒泡（避免觸發標題的展開摘要）
+function copyBtn(getText, tip){
+  const b = document.createElement('button');
+  b.className = 'copy';
+  b.innerHTML = ic('copy');
+  b.title = tip; b.setAttribute('aria-label', tip);
+  b.onclick = (e) => {
+    e.stopPropagation();
+    navigator.clipboard.writeText(getText() || '').then(
+      () => { b.innerHTML = ic('check'); },
+      () => { b.innerHTML = ic('x'); });
+    setTimeout(() => { b.innerHTML = ic('copy'); }, 1200);
+  };
+  return b;
+}
+
+function actBtn(label, cls, on, fn, tip){
   const b = document.createElement('button');
   b.className = 'act ' + cls.split(' ')[0] + (on?' on':'');
-  b.textContent = label;
+  b.innerHTML = label;
+  if(tip){ b.title = tip; b.setAttribute('aria-label', tip); }
   b.onclick = () => { fn(); render(); };
   return b;
 }
@@ -317,7 +377,7 @@ function uploadForPaper(p, btn){
   inp.onchange = async () => {
     const f = inp.files[0]; if(!f) return;
     if(f.type !== 'application/pdf'){ btn.textContent = '只接受PDF'; return; }
-    btn.textContent = '⏳ 上傳中';
+    btn.innerHTML = ic('hourglass')+' 上傳中';
     const qs = new URLSearchParams({ item_id: p.item_id, doi: p.doi || '', title: p.title || '' });
     try{
       const r = await fetch('/api/upload?' + qs.toString(),
@@ -328,13 +388,45 @@ function uploadForPaper(p, btn){
         a.pdf_key = j.key; save(LS_ACT, actions);
         render();
       } else {
-        btn.textContent = `✗ ${j.error||'失敗'}`;
+        btn.innerHTML = `${ic('x')} ${esc(j.error||'失敗')}`;
       }
-    }catch(e){ btn.textContent = '✗ 失敗'; }
+    }catch(e){ btn.innerHTML = `${ic('x')} 失敗`; }
   };
   inp.click();
 }
 
 function esc(s){ return (s||'').replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+// 摘要排版：結構式摘要（BACKGROUND:/Methods:/…）切段＋粗體標籤；一般摘要維持單段
+const ABS_SEC_RE = /\b(BACKGROUND|INTRODUCTION|OBJECTIVES?|AIMS?|PURPOSE|MATERIALS? AND METHODS?|METHODS?|METHODOLOGY|RESULTS?|FINDINGS|DISCUSSION|CONCLUSIONS?|CLINICAL (?:RELEVANCE|SIGNIFICANCE|IMPLICATIONS?)|TRIAL REGISTRATION|REGISTRATION|FUNDING)\s*:/gi;
+function fmtAbsLabel(s){
+  return s.toLowerCase().replace(/(^|\s)(\w)/g, (m,sp,c)=>sp+c.toUpperCase()).replace(/ And /g,' and ');
+}
+// 逐句切割：句號/問號/驚嘆號＋空白＋大寫（或數字/括號）開頭才算斷句；
+// 小數點(0.05)後面沒空白不會切；常見縮寫(e.g./i.e./vs./Fig.)切到就併回前一句
+function sentSplit(t){
+  const raw = t.replace(/([.!?])\s+(?=[A-Z0-9("“])/g, '$1\u0000').split('\u0000');
+  const ABBR = /\b(?:e\.g|i\.e|vs|cf|ca|approx|Figs?|resp)\.$/;
+  const out = [];
+  for(const s of raw){
+    if(out.length && ABBR.test(out[out.length-1])) out[out.length-1] += ' ' + s;
+    else out.push(s);
+  }
+  return out;
+}
+function formatAbs(text){
+  const ms = [...text.matchAll(ABS_SEC_RE)];
+  if(ms.length < 2)   // 標記太少視為非結構式 → 逐句分段
+    return sentSplit(text).map(s=>`<p>${esc(s)}</p>`).join('');
+  let html = '';
+  const pre = text.slice(0, ms[0].index).trim();
+  if(pre) html += `<p>${esc(pre)}</p>`;
+  for(let i = 0; i < ms.length; i++){
+    const start = ms[i].index + ms[i][0].length;
+    const end = i+1 < ms.length ? ms[i+1].index : text.length;
+    html += `<p><strong>${esc(fmtAbsLabel(ms[i][1]))}:</strong> ${esc(text.slice(start, end).trim())}</p>`;
+  }
+  return html;
+}
 
 init();
