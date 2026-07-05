@@ -2,7 +2,7 @@
 """paper_sync 純函數測試。跑法：python -X utf8 -m pytest tests/ -v"""
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from paper_sync import sanitize_filename, short_title, first_author_surname, note_filename, build_worklist
+from paper_sync import sanitize_filename, short_title, first_author_surname, note_filename, build_worklist, valid_item_id
 
 def test_sanitize_removes_windows_illegal_chars():
     assert sanitize_filename('a/b\\c:d*e?f"g<h>i|j') == 'abcdefghij'
@@ -73,6 +73,14 @@ def test_build_worklist_unknown_item_uses_d1_title():
     assert wl[0]['journal'] == ''
     assert wl[0]['note_filename'].endswith('Unknown - Uploaded paper.md') is True  # 日期可空，仍組得出檔名（無日期/作者則用 Unknown）
     assert wl[0]['note_filename'].endswith('.md')
+
+def test_valid_item_id_allowlist():
+    assert valid_item_id('doi:10.1155/ijod/6556335')
+    assert valid_item_id('h:a1b2c3')
+    assert valid_item_id('manual:1751700000')
+    assert not valid_item_id("x'); DROP TABLE actions;--")
+    assert not valid_item_id('')
+    assert not valid_item_id('a' * 65)
 
 def test_build_worklist_pdf_source_priority():
     assert build_worklist(rows(pdf_key='pdf/x.pdf'), PAPERS)[0]['pdf_source'] == 'r2'  # 這篇 meta 也有 oa_pdf_url → 驗證 r2 優先

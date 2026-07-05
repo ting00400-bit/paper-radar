@@ -81,6 +81,13 @@ def _wrangler(args):
 def _sql_quote(s):
     return "'" + str(s).replace("'", "''") + "'"
 
+# item_id 白名單：實際格式只有 doi:*/h:*/manual:*（字元含 \w : . / ( ) -）。
+# D1 的 item_id 是網站寫入的，這裡擋掉任何長相可疑的值，避免流進 SQL 拼接。
+_ID_OK = re.compile(r'^[\w:./()\-]{1,64}$')
+
+def valid_item_id(s):
+    return bool(_ID_OK.match(s or ''))
+
 def query_pending():
     out = _wrangler(['d1', 'execute', D1_NAME, '--remote', '--json', '--command',
                      'SELECT item_id, doi, title, star, deepread, content, pdf_key '
@@ -89,6 +96,9 @@ def query_pending():
     return data[0]['results']
 
 def mark_synced(item_ids):
+    bad = [i for i in item_ids if not valid_item_id(i)]
+    if bad:
+        raise ValueError(f'可疑 item_id，拒絕執行: {bad}')
     ids = ','.join(_sql_quote(i) for i in item_ids)
     _wrangler(['d1', 'execute', D1_NAME, '--remote', '--command',
                f'UPDATE actions SET synced=1 WHERE item_id IN ({ids})'])
