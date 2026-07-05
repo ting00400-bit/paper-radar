@@ -75,7 +75,7 @@ def test_build_worklist_unknown_item_uses_d1_title():
     assert wl[0]['note_filename'].endswith('.md')
 
 def test_build_worklist_pdf_source_priority():
-    assert build_worklist(rows(pdf_key='pdf/x.pdf'), PAPERS)[0]['pdf_source'] == 'r2'
+    assert build_worklist(rows(pdf_key='pdf/x.pdf'), PAPERS)[0]['pdf_source'] == 'r2'  # 這篇 meta 也有 oa_pdf_url → 驗證 r2 優先
     assert build_worklist(rows(), PAPERS)[0]['pdf_source'] == 'oa'          # 有 oa_pdf_url
     wl = build_worklist(rows(item_id='doi:10.2/def', title='Paper B'), PAPERS)
     assert wl[0]['pdf_source'] == 'missing'                                  # 都沒有

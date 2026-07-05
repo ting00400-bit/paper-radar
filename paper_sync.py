@@ -63,6 +63,7 @@ def build_worklist(pending_rows, papers_data):
             'pdf_key': r.get('pdf_key'),
             'oa_pdf_url': meta.get('oa_pdf_url'),
         }
+        # item['pub_date'] 已在上面合併過 first_seen，note_filename 只會走 pub_date 分支
         item['note_filename'] = note_filename(item)
         item['pdf_source'] = 'r2' if item['pdf_key'] else ('oa' if item['oa_pdf_url'] else 'missing')
         wl.append(item)
