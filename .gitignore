@@ -24,3 +24,4 @@ venv/
 .wrangler/
 wrangler.toml
 *.local
+_sync_tmp/
