@@ -6,7 +6,7 @@ CREATE TABLE IF NOT EXISTS actions (
   title     TEXT,
   vote      TEXT,           -- 'up' / 'down' / 'neutral' / NULL（訓練 interest_model）
   seen      INTEGER,        -- ✅ 已看過（按任一動作鈕都會標）；預設隱藏，純標記不觸發下游
-  star      INTEGER,        -- (deprecated) 舊「📌 收藏」；保留供舊列相容，前端已不再寫
+  star      INTEGER,        -- 📝 整理筆記請求（/paper-sync 撿去產 Obsidian 筆記；舊「收藏」欄位再利用）
   zotero    INTEGER,        -- (deprecated) 舊「📥 Zotero」；Zotero 改由 /paper-sync 共用前置自動加
   deepread  INTEGER,        -- 🔬 品質評讀 → /paper-review（沿用舊欄名 deepread）
   content   INTEGER,        -- 📚 內容整理 → /paper-digest

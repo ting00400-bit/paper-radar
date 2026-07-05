@@ -7,7 +7,7 @@
 //   其餘                     → 靜態資源
 // 整站在 CF Access 後面，呼叫者已是本人。綁定：D1=DB, R2=PDFS。
 
-// deepread = 🔬 品質評讀（沿用舊欄名）；content = 📚 內容整理。star/zotero 保留供舊列相容，前端已不再寫。
+// deepread = 🔬 品質評讀（沿用舊欄名）；content = 📚 內容整理；star = 📝 整理筆記請求（舊收藏欄再利用）；zotero 保留供舊列相容。
 const COLS = { vote: "vote", seen: "seen", star: "star", zotero: "zotero", deepread: "deepread", content: "content" };
 const UPLOAD_CAP = 300;            // 自設每月上傳上限（硬擋，獨立於 CF）。超過 → 429
 const MAX_BYTES = 30 * 1024 * 1024; // 單檔 30MB 上限

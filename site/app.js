@@ -37,6 +37,7 @@ const ICONS = {
   hourglass: '<path d="M5 22h14"/><path d="M5 2h14"/><path d="M17 22v-4.172a2 2 0 0 0-.586-1.414L12 12l-4.414 4.414A2 2 0 0 0 7 17.828V22"/><path d="M7 2v4.172a2 2 0 0 0 .586 1.414L12 12l4.414-4.414A2 2 0 0 0 17 6.172V2"/>',
   chevright: '<path d="m9 18 6-6-6-6"/>',
   chevdown:  '<path d="m6 9 6 6 6-6"/>',
+  pen:       '<path d="M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.375 2.625a2.121 2.121 0 1 1 3 3L12 15l-4 1 1-4Z"/>',
 };
 function ic(name){
   return `<svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name]}</svg>`;
@@ -54,6 +55,7 @@ async function loadActionsFromServer(){
       const e = {};
       if(a.vote) e.vote = a.vote;
       if(a.seen){ e.seen = true; seenAtLoad.add(a.item_id); }
+      if(a.star) e.star = true;           // 📝 整理筆記請求（沿用舊 star 欄）
       if(a.deepread) e.deepread = true;   // 🔬 品質（沿用 deepread 欄）
       if(a.content) e.content = true;      // 📚 內容
       if(a.pdf_key) e.pdf_key = a.pdf_key; // 📎 已上傳全文 R2 key
@@ -293,6 +295,7 @@ function card(p){
   acts.appendChild(actBtn(ic('eye')+' 已看','seen',!!a.seen,()=>toggle(p,'seen')));
   acts.appendChild(actBtn(ic('microscope')+' 品質','deepread',!!a.deepread,()=>toggleAct(p,'deepread')));
   acts.appendChild(actBtn(ic('book')+' 內容','content',!!a.content,()=>toggleAct(p,'content')));
+  acts.appendChild(actBtn(ic('pen')+' 筆記','star',!!a.star,()=>toggleAct(p,'star'),'整理筆記：下次論文同步時產出 Obsidian 筆記'));
   acts.appendChild(actBtn(ic('thumbup'),'up vote',a.vote==='up',()=>setVote(p,'up'),'讚'));
   acts.appendChild(actBtn(ic('meh'),'neutral vote',a.vote==='neutral',()=>setVote(p,'neutral'),'普通'));
   acts.appendChild(actBtn(ic('thumbdown'),'down vote',a.vote==='down',()=>setVote(p,'down'),'不喜歡'));

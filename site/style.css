@@ -120,5 +120,6 @@ main{padding:10px 12px 40px;max-width:760px;margin:0 auto}
 .act.neutral.on{background:#d97706;border-color:#b45309;color:#fff}
 .act.deepread.on{background:#2563eb;border-color:#1d4ed8;color:#fff}   /* 🔬 品質 */
 .act.content.on{background:#7c3aed;border-color:#6d28d9;color:#fff}    /* 📚 內容 */
+.act.star.on{background:#e11d48;border-color:#be123c;color:#fff}      /* 📝 筆記 */
 
 footer{text-align:center;color:var(--dim);font-size:.72rem;padding:16px}
