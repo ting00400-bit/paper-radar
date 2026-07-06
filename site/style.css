@@ -12,7 +12,7 @@ h1 svg.ic{width:20px;height:20px;vertical-align:-3px;color:var(--accent);margin-
 .act.up svg.ic,.act.neutral svg.ic,.act.down svg.ic{margin-right:0}  /* 純圖示投票鈕不留邊 */
 .copy svg.ic{width:12px;height:12px;display:block}
 .chip svg.ic,.up-check svg.ic{width:12px;height:12px;margin-right:5px}
-.sync-banner svg.ic,.visit-banner svg.ic,.upload summary svg.ic{margin-right:6px}
+.visit-banner svg.ic,.upload summary svg.ic{margin-right:6px}
 .head-toggle svg.ic{width:14px;height:14px;display:block}
 body{margin:0;background:var(--bg);color:var(--fg);
   font-family:-apple-system,"Segoe UI","Noto Sans TC",sans-serif;font-size:15px;line-height:1.5}
@@ -27,10 +27,6 @@ h1{font-family:"Figtree",-apple-system,"Segoe UI","Noto Sans TC",sans-serif;font
   background:var(--card);color:var(--dim);font-size:.95rem;line-height:1.4;cursor:pointer;user-select:none}
 .head-toggle.on{background:#ccfbf1;color:#0f766e;border-color:#5eead4}
 .head-extra{margin-top:6px}
-
-/* 等待同步 banner */
-.sync-banner{margin:8px 0 4px;padding:8px 10px;border-radius:8px;
-  background:#fef3c7;color:#92400e;font-size:.85rem;border:1px solid #fde68a}
 
 .visit-banner{margin:8px 0 4px;padding:8px 10px;border-radius:8px;cursor:pointer;
   background:#cffafe;color:#0e7490;font-size:.85rem;border:1px solid #67e8f9}

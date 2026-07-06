@@ -12,7 +12,6 @@ let topics = load(LS_TOPIC, null);
 let filt = load(LS_FILT, {badge:'all', sort:'score', search:'', tab:'unseen'});
 // 一次性遷移：舊版用 showSeen checkbox，映射到 tab 後不再讀寫 showSeen
 if(filt.tab === undefined){ filt.tab = filt.showSeen ? 'seen' : 'unseen'; delete filt.showSeen; }
-let pendingSync = 0;                 // synced=0 且有實際動作的筆數（給同步 banner）
 const seenAtLoad = new Set();        // 開頁當下已 seen 的 item_id → 只有「載入前就已看」的才隱藏；本 session 新點的留著（可再點第二顆鈕）
 let headCollapsed = load('pr_headcollapse_v1', window.innerWidth < 600);
 const hideTimers = new Map();        // item_id → 動作後延遲淡出的計時器（render 時全部重置）
@@ -52,7 +51,6 @@ async function loadActionsFromServer(){
     if(!r.ok) return;
     const j = await r.json();
     const map = {};
-    let pend = 0;
     for(const a of (j.actions||[])){
       const e = {};
       if(a.vote) e.vote = a.vote;
@@ -63,12 +61,8 @@ async function loadActionsFromServer(){
       if(a.pdf_key) e.pdf_key = a.pdf_key; // 📎 已上傳全文 R2 key
       if(a.updated) e.updated = a.updated;   // 最後互動時間（已看 tab「看過時間」排序用）
       if(Object.keys(e).length) map[a.item_id] = e;
-      // 等待同步＝未 synced 且有實際動作（純 seen 不算）
-      const actionable = a.vote || a.deepread || a.content || a.star || a.zotero || a.pdf_key;
-      if(!a.synced && actionable) pend++;
     }
     actions = map;
-    pendingSync = pend;
     save(LS_ACT, actions);
   }catch(e){ /* keep localStorage */ }
 }
@@ -95,7 +89,6 @@ async function init(){
   // seenAtLoad 補種：離線 / D1 失敗時也能用 localStorage 的 seen 來隱藏
   for(const [id,a] of Object.entries(actions)) if(a && a.seen) seenAtLoad.add(id);
   buildTopics();
-  buildSyncBanner();
   buildVisitBanner();
   bindFilters();
   bindTabs();
@@ -104,18 +97,6 @@ async function init(){
   bindHeadToggle();
   applyHeadCollapse();
   render();
-}
-
-// 等待同步 banner：提醒回 PC 喊「論文同步」（站在 CF Access 後，無法從網頁觸發）
-function buildSyncBanner(){
-  const el = document.getElementById('syncBanner');
-  if(!el) return;
-  if(pendingSync > 0){
-    el.innerHTML = `${ic('hourglass')} 目前 ${pendingSync} 篇等待同步 — 回 PC 對 Claude 說「論文同步」`;
-    el.classList.remove('hidden');
-  } else {
-    el.classList.add('hidden');
-  }
 }
 
 function bindHeadToggle(){
