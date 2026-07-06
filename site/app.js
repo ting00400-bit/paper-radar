@@ -3,7 +3,7 @@
 //     repo 內附 papers.sample.json 為合成範例（clone 後想直接看畫面可改名/複製成 papers.json）。
 const LS_ACT = 'pr_actions_v1';     // 各篇動作 {item_id:{vote,star,zotero,deepread}}
 const LS_TOPIC = 'pr_topics_v1';    // 主題開關 {group:bool}
-const LS_FILT = 'pr_filters_v1';    // {badge,sort,search,showSeen}
+const LS_FILT = 'pr_filters_v1';    // {badge,sort,search,tab}
 const API = '/api/action';          // Worker(step 4)；失敗則純本地
 
 let DATA = null;
@@ -325,12 +325,13 @@ function card(p){
   el.appendChild(sc); el.appendChild(body);
 
   // 本 session 剛按過動作的卡：反灰停留 2.5 秒再淡出收合。
-  // 期間可補按第二顆鈕（每次 render 重新計時）；淡出後視同「載入前已看」，重整或勾「顯示已看過」找得回來。
+  // 期間可補按第二顆鈕（每次 render 重新計時）；淡出後視同「載入前已看」，切「已看」tab 找得回來。
   if(filt.tab === 'unseen' && a.seen && !seenAtLoad.has(p.item_id)){
     hideTimers.set(p.item_id, setTimeout(() => {
       el.style.maxHeight = el.scrollHeight + 'px';
       requestAnimationFrame(() => { el.classList.add('fadeout'); el.style.maxHeight = '0'; });
-      setTimeout(() => { seenAtLoad.add(p.item_id); render(); }, 400);
+      // 內層也登記進 hideTimers：淡出中若別的操作觸發 render，這顆才清得掉
+      hideTimers.set(p.item_id, setTimeout(() => { seenAtLoad.add(p.item_id); render(); }, 400));
     }, 2500));
   }
   return el;
@@ -370,6 +371,7 @@ function setVote(p, v){
 function toggle(p, key){
   const a = actions[p.item_id] || (actions[p.item_id]={});
   a[key] = !a[key];
+  if(key==='seen' && !a[key]) seenAtLoad.delete(p.item_id);   // 取消已看→回未看 tab 後重按仍有 2.5 秒緩衝
   persist(p, key, a[key]);
 }
 // 標 seen（不重複送）。本 session 內 passSeen 不隱藏，下次重整才消失
