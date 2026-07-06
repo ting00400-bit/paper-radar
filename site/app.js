@@ -61,6 +61,7 @@ async function loadActionsFromServer(){
       if(a.deepread) e.deepread = true;   // 🔬 品質（沿用 deepread 欄）
       if(a.content) e.content = true;      // 📚 內容
       if(a.pdf_key) e.pdf_key = a.pdf_key; // 📎 已上傳全文 R2 key
+      if(a.updated) e.updated = a.updated;   // 最後互動時間（已看 tab「看過時間」排序用）
       if(Object.keys(e).length) map[a.item_id] = e;
       // 等待同步＝未 synced 且有實際動作（純 seen 不算）
       const actionable = a.vote || a.deepread || a.content || a.star || a.zotero || a.pdf_key;
@@ -98,6 +99,7 @@ async function init(){
   buildVisitBanner();
   bindFilters();
   bindTabs();
+  syncSortOptions();
   bindUpload();
   bindHeadToggle();
   applyHeadCollapse();
@@ -210,7 +212,7 @@ function syncBadgeUI(){
 
 function bindTabs(){
   document.querySelectorAll('#tabs .tab').forEach(t => {
-    t.onclick = () => { filt.tab = t.dataset.tab; save(LS_FILT, filt); render(); };
+    t.onclick = () => { filt.tab = t.dataset.tab; save(LS_FILT, filt); syncSortOptions(); render(); };
   });
 }
 // 筆數以「主題+badge+搜尋過濾後」為分母（與 footer 同基準），兩 tab 各自計數
@@ -219,6 +221,23 @@ function syncTabUI(unseenN, seenN){
     t.classList.toggle('on', t.dataset.tab === filt.tab);
     t.textContent = t.dataset.tab === 'seen' ? `已看 (${seenN})` : `未看 (${unseenN})`;
   });
+}
+
+// 「看過時間」排序只在已看 tab 有意義：動態加/移 option（option[hidden] 在 iOS Safari 不可靠）
+function syncSortOptions(){
+  const sort = document.getElementById('sort');
+  let opt = sort.querySelector('option[value="seenat"]');
+  if(filt.tab === 'seen'){
+    if(!opt){
+      opt = document.createElement('option');
+      opt.value = 'seenat'; opt.textContent = '看過時間 新→舊';
+      sort.appendChild(opt);
+    }
+  } else {
+    if(opt) opt.remove();
+    if(filt.sort === 'seenat'){ filt.sort = 'score'; save(LS_FILT, filt); }
+  }
+  sort.value = filt.sort;
 }
 
 function passTopic(p){ return topics[p.group]; }
@@ -258,8 +277,11 @@ function render(){
   for(const p of base) if((actions[p.item_id]||{}).seen) seenN++;
   syncTabUI(base.length - seenN, seenN);
   const ps = base.filter(passSeen);
+  const upd = p => (actions[p.item_id]||{}).updated || '';
   ps.sort(filt.sort==='date'
     ? (a,b)=> (b.pub_date||b.first_seen).localeCompare(a.pub_date||a.first_seen)
+    : filt.sort==='seenat'
+    ? (a,b)=> upd(b).localeCompare(upd(a)) || b.score - a.score
     : (a,b)=> b.score - a.score);
   list.innerHTML = '';
   for(const p of ps) list.appendChild(card(p));
