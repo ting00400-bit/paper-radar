@@ -21,6 +21,12 @@
   <div id="syncBanner" class="sync-banner hidden"></div>
   <div id="visitBanner" class="visit-banner hidden"></div>
 
+  <!-- 已看/未看分頁（常駐，不隨 headExtra 收合） -->
+  <div class="tabs" id="tabs">
+    <button class="tab" data-tab="unseen">未看</button>
+    <button class="tab" data-tab="seen">已看</button>
+  </div>
+
   <!-- 可折疊：搜尋 + 訂閱 + 上傳 + 篩選 -->
   <div id="headExtra" class="head-extra">
     <!-- 搜尋 -->
@@ -58,7 +64,6 @@
         <button class="chip" data-badge="inst"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 22V4a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v18Z"/><path d="M6 12H4a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h2"/><path d="M18 9h2a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-2"/><path d="M10 6h4"/><path d="M10 10h4"/><path d="M10 14h4"/><path d="M10 18h4"/></svg> 機構訂閱</button>
         <button class="chip" data-badge="new"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l1.9 5.7a2 2 0 0 0 1.4 1.4L21 12l-5.7 1.9a2 2 0 0 0-1.4 1.4L12 21l-1.9-5.7a2 2 0 0 0-1.4-1.4L3 12l5.7-1.9a2 2 0 0 0 1.4-1.4Z"/></svg> NEW</button>
       </div>
-      <label class="seen-toggle"><input type="checkbox" id="showSeen"> 顯示已看過</label>
     </div>
   </div>
 </header>

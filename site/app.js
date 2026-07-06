@@ -9,7 +9,9 @@ const API = '/api/action';          // Worker(step 4)；失敗則純本地
 let DATA = null;
 let actions = load(LS_ACT, {});
 let topics = load(LS_TOPIC, null);
-let filt = load(LS_FILT, {badge:'all', sort:'score', search:'', showSeen:false});
+let filt = load(LS_FILT, {badge:'all', sort:'score', search:'', tab:'unseen'});
+// 一次性遷移：舊版用 showSeen checkbox，映射到 tab 後不再讀寫 showSeen
+if(filt.tab === undefined){ filt.tab = filt.showSeen ? 'seen' : 'unseen'; delete filt.showSeen; }
 let pendingSync = 0;                 // synced=0 且有實際動作的筆數（給同步 banner）
 const seenAtLoad = new Set();        // 開頁當下已 seen 的 item_id → 只有「載入前就已看」的才隱藏；本 session 新點的留著（可再點第二顆鈕）
 let headCollapsed = load('pr_headcollapse_v1', window.innerWidth < 600);
@@ -95,6 +97,7 @@ async function init(){
   buildSyncBanner();
   buildVisitBanner();
   bindFilters();
+  bindTabs();
   bindUpload();
   bindHeadToggle();
   applyHeadCollapse();
@@ -195,9 +198,6 @@ function bindFilters(){
   const sort = document.getElementById('sort');
   sort.value = filt.sort;
   sort.onchange = () => { filt.sort=sort.value; save(LS_FILT,filt); render(); };
-  const ss = document.getElementById('showSeen');
-  if(ss){ ss.checked = !!filt.showSeen;
-    ss.onchange = () => { filt.showSeen=ss.checked; save(LS_FILT,filt); render(); }; }
   document.querySelectorAll('#badgeFilter .chip').forEach(c => {
     c.onclick = () => { filt.badge=c.dataset.badge; save(LS_FILT,filt); syncBadgeUI(); render(); };
   });
@@ -206,6 +206,19 @@ function bindFilters(){
 function syncBadgeUI(){
   document.querySelectorAll('#badgeFilter .chip').forEach(c =>
     c.dataset.on = (c.dataset.badge===filt.badge) ? '1' : '0');
+}
+
+function bindTabs(){
+  document.querySelectorAll('#tabs .tab').forEach(t => {
+    t.onclick = () => { filt.tab = t.dataset.tab; save(LS_FILT, filt); render(); };
+  });
+}
+// 筆數以「主題+badge+搜尋過濾後」為分母（與 footer 同基準），兩 tab 各自計數
+function syncTabUI(unseenN, seenN){
+  document.querySelectorAll('#tabs .tab').forEach(t => {
+    t.classList.toggle('on', t.dataset.tab === filt.tab);
+    t.textContent = t.dataset.tab === 'seen' ? `已看 (${seenN})` : `未看 (${unseenN})`;
+  });
 }
 
 function passTopic(p){ return topics[p.group]; }
@@ -217,7 +230,6 @@ function passBadge(p){
     case 'oanew': return !!p.oaNew;
     case 'inst': return p.inst_subscribed===1;
     case 'new': return p.isNew;
-    case 'unseen': return !a.seen;
     case 'visit': return p.first_seen === todayLocalStr();
     default: return true;
   }
@@ -229,11 +241,10 @@ function passSearch(p){
   return (p.title+' '+p.authors+' '+p.source_name).toLowerCase().includes(q);
 }
 
-// 已看過預設隱藏；勾「顯示已看過」才顯示。
-// 只隱藏「載入前就已 seen」的；本 session 剛點的留著（讓你能在同一張卡先按品質再按內容）。
+// 分頁分流：已看 tab 只留 seen；未看 tab 留未 seen 或「本 session 剛按、還在淡出緩衝期」的
 function passSeen(p){
-  if(filt.showSeen) return true;
   const a = actions[p.item_id] || {};
+  if(filt.tab === 'seen') return !!a.seen;
   if(!a.seen) return true;
   return !seenAtLoad.has(p.item_id);
 }
@@ -243,15 +254,16 @@ function render(){
   hideTimers.clear();
   const list = document.getElementById('list');
   const base = DATA.papers.filter(p => passTopic(p) && passBadge(p) && passSearch(p));
+  let seenN = 0;
+  for(const p of base) if((actions[p.item_id]||{}).seen) seenN++;
+  syncTabUI(base.length - seenN, seenN);
   const ps = base.filter(passSeen);
   ps.sort(filt.sort==='date'
     ? (a,b)=> (b.pub_date||b.first_seen).localeCompare(a.pub_date||a.first_seen)
     : (a,b)=> b.score - a.score);
   list.innerHTML = '';
   for(const p of ps) list.appendChild(card(p));
-  const hidden = base.length - ps.length;
-  document.getElementById('count').textContent =
-    `顯示 ${ps.length} 篇` + (hidden>0 ? `（隱藏 ${hidden} 已看）` : '');
+  document.getElementById('count').textContent = `顯示 ${ps.length} 篇`;
 }
 
 function card(p){
@@ -314,7 +326,7 @@ function card(p){
 
   // 本 session 剛按過動作的卡：反灰停留 2.5 秒再淡出收合。
   // 期間可補按第二顆鈕（每次 render 重新計時）；淡出後視同「載入前已看」，重整或勾「顯示已看過」找得回來。
-  if(!filt.showSeen && a.seen && !seenAtLoad.has(p.item_id)){
+  if(filt.tab === 'unseen' && a.seen && !seenAtLoad.has(p.item_id)){
     hideTimers.set(p.item_id, setTimeout(() => {
       el.style.maxHeight = el.scrollHeight + 'px';
       requestAnimationFrame(() => { el.classList.add('fadeout'); el.style.maxHeight = '0'; });
