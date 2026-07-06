@@ -404,6 +404,8 @@ function markSeen(p){
 // 🔬品質 / 📚內容：toggle 後一律標 seen
 function toggleAct(p, key){ toggle(p, key); markSeen(p); }
 function persist(p, key, val){
+  // 本地也 bump updated（與 Worker 同格式）：剛按的卡在「看過時間」排序才會置頂，不用等重整回填
+  const a = actions[p.item_id]; if(a) a.updated = new Date().toISOString();
   save(LS_ACT, actions);
   // best-effort 推 Worker(step 4)；失敗純本地保留，/paper-sync 之後可補
   fetch(API, {method:'POST', headers:{'Content-Type':'application/json'},
