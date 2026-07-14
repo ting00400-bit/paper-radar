@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 """paper_sync 純函數測試。跑法：python -X utf8 -m pytest tests/ -v"""
+import errno
 import hashlib
+import importlib.util
 import json
 import socket
 import sys, os
@@ -150,6 +152,7 @@ def test_wrangler_failure_preserves_bounded_stdout_and_stderr(tmp_path, monkeypa
     'https://127.0.0.1/paper.pdf',
     'https://10.0.0.1/paper.pdf',
     'https://169.254.1.1/paper.pdf',
+    'https://224.0.0.1/paper.pdf',
     'https://[::1]/paper.pdf',
 ])
 def test_validate_oa_url_rejects_non_https_and_non_global_ips(url):
@@ -173,16 +176,135 @@ def test_validate_oa_url_accepts_hostname_resolving_to_global_ip(monkeypatch):
     assert paper_sync._validate_oa_url(url) == url
 
 
-def test_redirect_handler_validates_each_redirect_target(monkeypatch):
-    seen = []
-    monkeypatch.setattr(paper_sync, '_validate_oa_url', seen.append, raising=False)
-    request = urllib.request.Request('https://example.test/start.pdf')
+def test_pinned_https_connection_uses_verified_ip_and_hostname_sni(monkeypatch):
+    calls = {}
+    raw_socket = object()
+    wrapped_socket = object()
 
-    redirected = paper_sync._ValidatingRedirectHandler().redirect_request(
-        request, None, 302, 'Found', {}, 'https://cdn.example.test/final.pdf')
+    class Context:
+        verify_mode = paper_sync.ssl.CERT_REQUIRED
+        check_hostname = True
 
-    assert redirected.full_url == 'https://cdn.example.test/final.pdf'
-    assert seen == ['https://cdn.example.test/final.pdf']
+        def wrap_socket(self, sock, server_hostname):
+            calls['sni'] = server_hostname
+            assert sock is raw_socket
+            return wrapped_socket
+
+    def fake_create_connection(address, timeout, source_address):
+        calls['address'] = address
+        calls['timeout'] = timeout
+        calls['source_address'] = source_address
+        return raw_socket
+
+    monkeypatch.setattr(socket, 'create_connection', fake_create_connection)
+    connection = paper_sync._PinnedHTTPSConnection(
+        'papers.example.test', 8443, '93.184.216.34',
+        context=Context(), timeout=12)
+    connection.connect()
+
+    assert calls['address'] == ('93.184.216.34', 8443)
+    assert calls['sni'] == 'papers.example.test'
+    assert connection.sock is wrapped_socket
+
+
+def test_manual_redirect_closes_without_reading_body_and_revalidates_each_hop(
+        tmp_path, monkeypatch):
+    seen_urls = []
+    requests = []
+    connections = []
+
+    class Response:
+        headers = {}
+
+        def __init__(self, status, location=None, payload=None):
+            self.status = status
+            self.location = location
+            self.payload = payload
+            self.closed = False
+            self.read_calls = 0
+
+        def getheader(self, name):
+            return self.location if name == 'Location' else None
+
+        def read(self, size):
+            self.read_calls += 1
+            if 300 <= self.status < 400:
+                raise AssertionError('redirect body must not be read')
+            return self.payload
+
+        def close(self):
+            self.closed = True
+
+    responses = [
+        Response(302, location='/final.pdf'),
+        Response(200, payload=b'%PDF' + b'x' * 3000),
+    ]
+
+    class Connection:
+        def __init__(self, host, port, pinned_ip, *, context, timeout):
+            self.response = responses[len(connections)]
+            connections.append(self)
+
+        def request(self, method, path, headers):
+            requests.append((method, path, headers))
+
+        def getresponse(self):
+            return self.response
+
+        def close(self):
+            pass
+
+    def resolve(url):
+        seen_urls.append(url)
+        return paper_sync.urlsplit(url), '93.184.216.34'
+
+    monkeypatch.setattr(paper_sync, '_resolve_public_https', resolve, raising=False)
+    part = tmp_path / 'download.part'
+    paper_sync._download_oa_pdf(
+        'https://example.test:8443/start.pdf', part,
+        context=object(), connection_factory=Connection)
+
+    assert seen_urls == [
+        'https://example.test:8443/start.pdf',
+        'https://example.test:8443/final.pdf',
+    ]
+    assert responses[0].read_calls == 0
+    assert all(response.closed for response in responses)
+    assert [request[2]['Host'] for request in requests] == [
+        'example.test:8443', 'example.test:8443']
+    assert paper_sync.is_valid_pdf(part)
+
+
+@pytest.mark.parametrize(('status', 'expected'), [
+    (400, False), (401, False), (403, False), (404, False),
+    (429, True), (500, True), (503, True),
+])
+def test_http_status_retryability_is_typed(status, expected):
+    assert paper_sync._retryable_error(
+        paper_sync._HttpStatusError(status)) is expected
+
+
+def test_dns_and_network_retryability_is_typed():
+    assert paper_sync._retryable_error(
+        socket.gaierror(socket.EAI_AGAIN, 'try again')) is True
+    assert paper_sync._retryable_error(
+        socket.gaierror(socket.EAI_NONAME, 'not found')) is False
+    assert paper_sync._retryable_error(
+        ConnectionResetError(errno.ECONNRESET, 'reset')) is True
+    assert paper_sync._retryable_error(OSError('unknown os error')) is False
+
+
+@pytest.mark.parametrize(('message', 'expected'), [
+    ('request timeout', True),
+    ('HTTP 429 rate limited', True),
+    ('503 service unavailable', True),
+    ('unauthorized API token', False),
+    ('invalid wrangler config', False),
+    ('R2 object not found', False),
+    ('unexpected wrangler failure', False),
+])
+def test_wrangler_runtime_retryability_requires_explicit_evidence(message, expected):
+    assert paper_sync._retryable_error(RuntimeError(message)) is expected
 
 
 def test_read_limited_rejects_payload_over_limit():
@@ -571,6 +693,233 @@ def test_acquire_pdf_preserves_prior_retryable_when_fetch_routes_exhausted(
     assert result['retryable'] is True
     assert 'r2: R2 timeout' in result['fetch_error']
     assert 'paper-fetch: https://resolver.test' in result['fetch_error']
+
+
+def test_acquire_pdf_unknown_wrangler_runtime_error_is_not_retryable(
+        tmp_path, monkeypatch):
+    monkeypatch.setattr(paper_sync, 'WORK_DIR', tmp_path)
+    monkeypatch.setattr(
+        paper_sync, '_wrangler',
+        lambda args: (_ for _ in ()).throw(RuntimeError('unexpected failure')))
+
+    result = paper_sync.acquire_pdf({
+        'item_id': 'manual:unknown-r2', 'pdf_key': 'pdf/test.pdf',
+        'oa_pdf_url': None, 'doi': '',
+    })
+
+    assert result['pdf'] is None
+    assert result['retryable'] is False
+
+
+@pytest.mark.parametrize(('status', 'expected'), [(404, False), (503, True)])
+def test_acquire_pdf_http_status_retryability(status, expected, tmp_path, monkeypatch):
+    monkeypatch.setattr(paper_sync, 'WORK_DIR', tmp_path)
+    monkeypatch.setattr(
+        paper_sync, '_download_oa_pdf',
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            paper_sync._HttpStatusError(status)))
+
+    result = paper_sync.acquire_pdf({
+        'item_id': f'manual:http-{status}', 'pdf_key': None,
+        'oa_pdf_url': 'https://example.test/paper.pdf', 'doi': '',
+    })
+
+    assert result['pdf'] is None
+    assert result['retryable'] is expected
+
+
+@pytest.fixture
+def identity_dirs(tmp_path, monkeypatch):
+    work_dir = tmp_path / 'work'
+    quarantine_dir = tmp_path / 'quarantine'
+    work_dir.mkdir()
+    monkeypatch.setattr(paper_sync, 'WORK_DIR', work_dir)
+    monkeypatch.setattr(paper_sync, 'QUARANTINE_DIR', quarantine_dir, raising=False)
+    return work_dir, quarantine_dir
+
+
+def test_record_identity_rejection_writes_atomic_marker_and_only_quarantines_expected_cache(
+        identity_dirs):
+    work_dir, quarantine_dir = identity_dirs
+    item_id = 'manual:identity-1'
+    expected_cache = work_dir / paper_sync.cache_filename(item_id)
+    expected_cache.write_bytes(b'%PDF' + b'x' * 3000)
+    old_unhashed = work_dir / 'manualidentity-1.pdf'
+    old_unhashed.write_bytes(b'%PDF' + b'o' * 3000)
+    unrelated = work_dir / 'unrelated.pdf'
+    unrelated.write_bytes(b'%PDF' + b'u' * 3000)
+
+    state = paper_sync.record_identity_rejection(
+        item_id, source='r2', route='r2', reason='DOI mismatch')
+
+    assert state['item_id'] == item_id
+    assert state['attempts'] == 1
+    assert state['rejected_sources'] == ['r2']
+    assert state['rejected_routes'] == ['r2']
+    assert state['reason'] == 'DOI mismatch'
+    assert not expected_cache.exists()
+    assert old_unhashed.exists() and unrelated.exists()
+    markers = list(quarantine_dir.glob('*.json'))
+    quarantined = list(quarantine_dir.glob('*.pdf'))
+    assert len(markers) == 1 and len(quarantined) == 1
+    assert json.loads(markers[0].read_text(encoding='utf-8')) == state
+    assert not list(quarantine_dir.glob('*.part'))
+
+
+def test_repeated_identity_rejections_use_unique_quarantine_names(identity_dirs):
+    work_dir, quarantine_dir = identity_dirs
+    item_id = 'manual:identity-unique'
+    cache = work_dir / paper_sync.cache_filename(item_id)
+    cache.write_bytes(b'%PDF' + b'a' * 3000)
+    paper_sync.record_identity_rejection(
+        item_id, source='r2', route='r2', reason='first mismatch')
+    cache.write_bytes(b'%PDF' + b'b' * 3000)
+
+    state = paper_sync.record_identity_rejection(
+        item_id, source='oa-url', route='oa-url', reason='second mismatch')
+
+    names = [path.name for path in quarantine_dir.glob('*.pdf')]
+    assert len(names) == 2 and len(set(names)) == 2
+    assert state['attempts'] == 2
+    assert state['rejected_sources'] == ['r2', 'oa-url']
+
+
+def test_identity_marker_survives_fresh_module_session_and_blocks_network(
+        identity_dirs, monkeypatch):
+    work_dir, quarantine_dir = identity_dirs
+    item_id = 'manual:identity-session'
+    paper_sync.record_identity_rejection(
+        item_id, source='r2', route='r2', reason='first mismatch')
+    paper_sync.record_identity_rejection(
+        item_id, source='oa-url', route='oa-url', reason='second mismatch')
+
+    spec = importlib.util.spec_from_file_location('paper_sync_session2', paper_sync.__file__)
+    session2 = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(session2)
+    session2.WORK_DIR = work_dir
+    session2.QUARANTINE_DIR = quarantine_dir
+    session2._wrangler = lambda args: (_ for _ in ()).throw(
+        AssertionError('network must not run'))
+    session2._download_oa_pdf = lambda *args, **kwargs: (_ for _ in ()).throw(
+        AssertionError('network must not run'))
+
+    result = session2.acquire_pdf({
+        'item_id': item_id, 'pdf_key': 'pdf/test.pdf',
+        'oa_pdf_url': 'https://example.test/paper.pdf', 'doi': '10.1000/test',
+    }, runner=lambda *args, **kwargs: (_ for _ in ()).throw(
+        AssertionError('network must not run')))
+
+    assert result == {
+        'pdf': None, 'pdf_source': 'missing', 'fetch_route': None,
+        'fetch_error': 'source_identity_mismatch', 'retryable': False,
+    }
+
+
+def test_first_identity_rejection_skips_rejected_source_and_reserves_one_reacquire(
+        identity_dirs, monkeypatch):
+    work_dir, _ = identity_dirs
+    item_id = 'manual:identity-skip'
+    paper_sync.record_identity_rejection(
+        item_id, source='r2', route='r2', reason='R2 DOI mismatch')
+    monkeypatch.setattr(
+        paper_sync, '_wrangler',
+        lambda args: (_ for _ in ()).throw(AssertionError('rejected R2 must be skipped')))
+
+    def download(url, part):
+        Path(part).write_bytes(b'%PDF' + b'x' * 3000)
+
+    monkeypatch.setattr(paper_sync, '_download_oa_pdf', download)
+    result = paper_sync.acquire_pdf({
+        'item_id': item_id, 'pdf_key': 'pdf/test.pdf',
+        'oa_pdf_url': 'https://example.test/paper.pdf', 'doi': '',
+    })
+
+    assert result['pdf_source'] == 'oa-url'
+    assert paper_sync.load_identity_rejection(item_id)['attempts'] == 2
+    assert Path(result['pdf']) == work_dir / paper_sync.cache_filename(item_id)
+
+
+def test_reserved_reacquire_makes_next_acquire_terminal_without_network(
+        identity_dirs, monkeypatch):
+    item_id = 'manual:identity-once'
+    paper_sync.record_identity_rejection(
+        item_id, source='r2', route='r2', reason='R2 mismatch')
+    monkeypatch.setattr(
+        paper_sync, '_download_oa_pdf',
+        lambda *args, **kwargs: (_ for _ in ()).throw(TimeoutError('OA timeout')))
+    item = {
+        'item_id': item_id, 'pdf_key': 'pdf/test.pdf',
+        'oa_pdf_url': 'https://example.test/paper.pdf', 'doi': '',
+    }
+    first = paper_sync.acquire_pdf(item)
+    assert first['retryable'] is True
+
+    monkeypatch.setattr(
+        paper_sync, '_wrangler',
+        lambda args: (_ for _ in ()).throw(AssertionError('network must not run')))
+    monkeypatch.setattr(
+        paper_sync, '_download_oa_pdf',
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError('network must not run')))
+    second = paper_sync.acquire_pdf(item)
+    assert second['fetch_error'] == 'source_identity_mismatch'
+    assert second['retryable'] is False
+
+
+def test_accept_and_reset_clear_identity_marker(identity_dirs):
+    item_id = 'manual:identity-clear'
+    paper_sync.record_identity_rejection(
+        item_id, source='cache', route='cache', reason='mismatch')
+    paper_sync.accept_identity(item_id)
+    assert paper_sync.load_identity_rejection(item_id) is None
+
+    paper_sync.record_identity_rejection(
+        item_id, source='cache', route='cache', reason='replacement needed')
+    paper_sync.reset_identity_rejection(item_id)
+    assert paper_sync.load_identity_rejection(item_id) is None
+
+
+def test_legacy_unhashed_cache_is_left_as_orphan_and_never_hits(identity_dirs):
+    work_dir, _ = identity_dirs
+    item_id = 'manual:legacy-cache'
+    legacy = work_dir / (sanitize_filename(item_id).replace(' ', '_') + '.pdf')
+    legacy.write_bytes(b'%PDF' + b'x' * 3000)
+
+    result = paper_sync.acquire_pdf({
+        'item_id': item_id, 'pdf_key': None, 'oa_pdf_url': None, 'doi': '',
+    })
+
+    assert result['pdf'] is None
+    assert legacy.exists()
+
+
+@pytest.mark.parametrize('argv', [
+    ['paper_sync.py', 'reject', 'anything', 'r2', 'r2', 'reason'],
+    ['paper_sync.py', 'accept', 'anything'],
+    ['paper_sync.py', 'reset-rejection', 'anything'],
+    ['paper_sync.py', 'reject', 'manual:1', 'bad-source', 'r2', 'reason'],
+    ['paper_sync.py', 'reject', 'manual:1', 'r2', 'bad&route', 'reason'],
+])
+def test_local_identity_cli_rejects_non_allowlisted_arguments(
+        argv, identity_dirs, monkeypatch):
+    monkeypatch.setattr(sys, 'argv', argv)
+    with pytest.raises(ValueError):
+        paper_sync.main()
+
+
+def test_local_reject_cli_records_marker_without_wrangler(identity_dirs, monkeypatch):
+    item_id = 'manual:cli-local'
+    monkeypatch.setattr(
+        paper_sync, '_wrangler',
+        lambda args: (_ for _ in ()).throw(AssertionError('wrangler must not run')))
+    monkeypatch.setattr(sys, 'argv', [
+        'paper_sync.py', 'reject', item_id, 'r2', 'r2', 'DOI mismatch'])
+
+    paper_sync.main()
+
+    state = paper_sync.load_identity_rejection(item_id)
+    assert state['attempts'] == 1
+    assert state['reason'] == 'DOI mismatch'
 
 
 def test_cmd_pending_writes_all_acquisition_result_keys(tmp_path, monkeypatch):

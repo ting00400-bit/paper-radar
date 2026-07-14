@@ -4,24 +4,28 @@
 用法（都在 repo 根目錄跑、python -X utf8）：
   python -X utf8 paper_sync.py pending   # 查 D1 待辦→補 metadata→下載 PDF→輸出 worklist JSON
   python -X utf8 paper_sync.py done ID…  # 逐篇標 synced=1
+  python -X utf8 paper_sync.py reject ID SOURCE ROUTE REASON  # 本機記錄來源身分錯誤
+  python -X utf8 paper_sync.py accept ID                      # 本機清除已驗證 marker
+  python -X utf8 paper_sync.py reset-rejection ID             # 本機允許人工修正後重試
 
 注意：wrangler 走本機 OAuth（有 D1 寫入權）。subprocess 會拿掉 CLOUDFLARE_API_TOKEN，
 避免誤吃 .env 的 NAS 唯讀 token。
 """
-import hashlib, ipaddress, json, os, re, socket, ssl, subprocess, sys, uuid
-import urllib.request
+import errno, hashlib, http.client, ipaddress, json, os, re, socket, ssl, subprocess, sys, uuid
 from collections.abc import Mapping
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit, urlunsplit
 
 REPO = Path(__file__).resolve().parent
 PAPER_FETCH = REPO.parents[1] / '700_Scripts' / 'paper-fetch' / 'paper_fetch.py'
 PAPERS_JSON = Path(r'Z:/docker/paper-radar/papers.json')   # NAS canonical
 WORK_DIR = REPO / '_sync_tmp'                               # PDF 暫存＋worklist
+QUARANTINE_DIR = REPO.parents[1] / '500_temp' / 'paper-sync-quarantine'
 D1_NAME = 'paper-radar-db'
 R2_BUCKET = 'paper-radar-pdfs'
 MIN_PDF_BYTES = 1000
 MAX_PDF_BYTES = 100 * 1024 * 1024
+MAX_REDIRECTS = 5
 MAX_ERROR_CHARS = 300
 MAX_R2_KEY_CHARS = 512
 PENDING_SQL = (
@@ -133,6 +137,8 @@ def _sql_quote(s):
 # D1 的 item_id 是網站寫入的，這裡擋掉任何長相可疑的值，避免流進 SQL 拼接。
 _ID_OK = re.compile(r'(?=.{1,64}\Z)(?:doi|h|manual):[A-Za-z0-9_:./()\-]+', re.ASCII)
 _PDF_KEY_PART = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]*', re.ASCII)
+_ROUTE_OK = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,63}', re.ASCII)
+_IDENTITY_SOURCES = {'cache', 'r2', 'oa-url', 'paper-fetch'}
 
 def valid_item_id(s):
     return isinstance(s, str) and bool(_ID_OK.fullmatch(s))
@@ -141,6 +147,84 @@ def valid_pdf_key(key):
     if not isinstance(key, str) or not key or len(key) > MAX_R2_KEY_CHARS:
         return False
     return all(_PDF_KEY_PART.fullmatch(part) for part in key.split('/'))
+
+def _item_digest(item_id):
+    return hashlib.sha256(str(item_id).encode('utf-8')).hexdigest()
+
+def _identity_marker_path(item_id):
+    return QUARANTINE_DIR / f'{_item_digest(item_id)}.json'
+
+def load_identity_rejection(item_id):
+    marker = _identity_marker_path(item_id)
+    if not marker.exists():
+        return None
+    try:
+        state = json.loads(marker.read_text(encoding='utf-8'))
+        if (not isinstance(state, Mapping) or state.get('item_id') != item_id
+                or not isinstance(state.get('attempts'), int)):
+            raise ValueError('invalid identity rejection marker')
+        return dict(state)
+    except (OSError, ValueError, json.JSONDecodeError):
+        return {
+            'item_id': item_id, 'attempts': 2,
+            'rejected_sources': [], 'rejected_routes': [],
+            'reason': 'invalid identity rejection marker',
+        }
+
+def _write_identity_rejection(state):
+    QUARANTINE_DIR.mkdir(parents=True, exist_ok=True)
+    marker = _identity_marker_path(state['item_id'])
+    part = marker.with_name(f'{marker.stem}.{uuid.uuid4().hex}.part')
+    try:
+        part.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding='utf-8')
+        part.replace(marker)
+    finally:
+        _cleanup_part(part)
+
+def _validate_identity_args(item_id, source=None, route=None, reason=None):
+    if not valid_item_id(item_id):
+        raise ValueError(f'可疑 item_id，拒絕執行: {item_id!r}')
+    if source is not None and source not in _IDENTITY_SOURCES:
+        raise ValueError(f'invalid identity source: {source!r}')
+    if route is not None and not _ROUTE_OK.fullmatch(route):
+        raise ValueError(f'invalid identity route: {route!r}')
+    if reason is not None and not str(reason).strip():
+        raise ValueError('identity rejection reason is required')
+
+def record_identity_rejection(item_id, *, source, route=None, reason):
+    _validate_identity_args(item_id, source, route, reason)
+    previous = load_identity_rejection(item_id)
+    sources = list(previous.get('rejected_sources', [])) if previous else []
+    routes = list(previous.get('rejected_routes', [])) if previous else []
+    if source not in sources:
+        sources.append(source)
+    if route and route not in routes:
+        routes.append(route)
+    state = {
+        'item_id': item_id,
+        'attempts': 1 if previous is None else max(2, previous['attempts']),
+        'rejected_sources': sources,
+        'rejected_routes': routes,
+        'reason': _short_error(reason, 'identity mismatch'),
+    }
+    _write_identity_rejection(state)
+
+    cache = WORK_DIR / cache_filename(item_id)
+    if cache.is_file():
+        quarantine = QUARANTINE_DIR / (
+            f'{_item_digest(item_id)}-{uuid.uuid4().hex}.pdf')
+        cache.replace(quarantine)
+    return state
+
+def _clear_identity_rejection(item_id):
+    _validate_identity_args(item_id)
+    _identity_marker_path(item_id).unlink(missing_ok=True)
+
+def accept_identity(item_id):
+    _clear_identity_rejection(item_id)
+
+def reset_identity_rejection(item_id):
+    _clear_identity_rejection(item_id)
 
 def is_valid_pdf(path):
     p = Path(path)
@@ -158,6 +242,48 @@ def _cleanup_part(part):
 def _short_error(value, default='no route'):
     text = ' '.join(str(value or '').split()) or default
     return text[:MAX_ERROR_CHARS]
+
+class _HttpStatusError(RuntimeError):
+    def __init__(self, status):
+        self.status = status
+        self.retryable = status == 429 or 500 <= status <= 599
+        super().__init__(f'HTTP {status}')
+
+_NON_TRANSIENT_TEXT = (
+    'unauthorized', 'forbidden', 'authentication', 'authorization',
+    'invalid config', 'configuration', 'not found', 'no such object',
+    'http 400', 'http 401', 'http 403', 'http 404',
+)
+_TRANSIENT_TEXT = (
+    'timeout', 'timed out', 'temporary', 'try again', 'rate limit',
+    'http 429', 'http 500', 'http 502', 'http 503', 'http 504',
+    'service unavailable', 'connection reset', 'network unreachable',
+    'locked',
+)
+_TRANSIENT_ERRNOS = {
+    errno.ECONNRESET, errno.ECONNREFUSED, errno.ENETUNREACH,
+    errno.EHOSTUNREACH, errno.ETIMEDOUT, errno.EPIPE,
+    10054, 10060, 10061, 10065,
+}
+
+def _retryable_error(exc):
+    typed = getattr(exc, 'retryable', None)
+    if isinstance(typed, bool):
+        return typed
+    if isinstance(exc, (subprocess.TimeoutExpired, TimeoutError, socket.timeout)):
+        return True
+    if isinstance(exc, socket.gaierror):
+        return exc.errno == socket.EAI_AGAIN
+    text = str(exc).lower()
+    if any(token in text for token in _NON_TRANSIENT_TEXT):
+        return False
+    if isinstance(exc, OSError):
+        code = getattr(exc, 'winerror', None) or exc.errno
+        return code in _TRANSIENT_ERRNOS or any(
+            token in text for token in _TRANSIENT_TEXT)
+    if isinstance(exc, RuntimeError):
+        return any(token in text for token in _TRANSIENT_TEXT)
+    return False
 
 def run_paper_fetch(doi, dest, runner=subprocess.run):
     dest = Path(dest)
@@ -194,7 +320,7 @@ def run_paper_fetch(doi, dest, runner=subprocess.run):
         result.update(fetch_error='paper-fetch timeout', retryable=True)
         return result
     except OSError as exc:
-        result.update(fetch_error=_short_error(exc), retryable=True)
+        result.update(fetch_error=_short_error(exc), retryable=_retryable_error(exc))
         return result
     except (ValueError, json.JSONDecodeError) as exc:
         result['fetch_error'] = _short_error(exc)
@@ -234,7 +360,13 @@ def _promote_pdf(part, dest):
         raise ValueError('downloaded payload is not a valid PDF')
     part.replace(dest)
 
-def _validate_oa_url(url):
+def _is_public_address(address):
+    return address.is_global and not any((
+        address.is_loopback, address.is_private, address.is_link_local,
+        address.is_multicast, address.is_reserved, address.is_unspecified,
+    ))
+
+def _resolve_public_https(url):
     parsed = urlsplit(str(url or ''))
     if parsed.scheme.lower() != 'https' or not parsed.hostname:
         raise ValueError('oa_pdf_url must use HTTPS with a hostname')
@@ -247,20 +379,31 @@ def _validate_oa_url(url):
 
     host = parsed.hostname
     try:
-        addresses = {ipaddress.ip_address(host)}
+        addresses = [ipaddress.ip_address(host)]
     except ValueError:
         resolved = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
-        addresses = {
-            ipaddress.ip_address(info[4][0].split('%', 1)[0]) for info in resolved
-        }
-    if not addresses or any(not address.is_global for address in addresses):
+        addresses = []
+        for info in resolved:
+            address = ipaddress.ip_address(info[4][0].split('%', 1)[0])
+            if address not in addresses:
+                addresses.append(address)
+    if not addresses or any(not _is_public_address(address) for address in addresses):
         raise ValueError('oa_pdf_url resolved to a non-public address')
+    return parsed, str(addresses[0])
+
+def _validate_oa_url(url):
+    _resolve_public_https(url)
     return url
 
-class _ValidatingRedirectHandler(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        _validate_oa_url(newurl)
-        return super().redirect_request(req, fp, code, msg, headers, newurl)
+class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+    def __init__(self, host, port, pinned_ip, *, context, timeout):
+        self._pinned_ip = pinned_ip
+        super().__init__(host, port, context=context, timeout=timeout)
+
+    def connect(self):
+        raw = socket.create_connection(
+            (self._pinned_ip, self.port), self.timeout, self.source_address)
+        self.sock = self._context.wrap_socket(raw, server_hostname=self.host)
 
 def _read_limited(response, limit=MAX_PDF_BYTES):
     raw_length = response.headers.get('Content-Length')
@@ -276,34 +419,79 @@ def _read_limited(response, limit=MAX_PDF_BYTES):
         raise ValueError('PDF exceeds maximum size')
     return data
 
-def _download_oa_pdf(url, part):
-    _validate_oa_url(url)
+def _ssl_context():
     try:
         import certifi
-        ctx = ssl.create_default_context(cafile=certifi.where())
+        return ssl.create_default_context(cafile=certifi.where())
     except ImportError:
-        ctx = ssl.create_default_context()
-    opener = urllib.request.build_opener(
-        urllib.request.HTTPSHandler(context=ctx), _ValidatingRedirectHandler())
-    request = urllib.request.Request(
-        url, headers={'User-Agent': 'paper-radar-sync/1.0'})
-    with opener.open(request, timeout=60) as response:
-        final_url = response.geturl() if hasattr(response, 'geturl') else url
-        _validate_oa_url(final_url)
-        part.write_bytes(_read_limited(response))
+        return ssl.create_default_context()
+
+def _host_header(parsed):
+    host = f'[{parsed.hostname}]' if ':' in parsed.hostname else parsed.hostname
+    port = parsed.port or 443
+    return f'{host}:{port}' if port != 443 else host
+
+def _download_oa_pdf(url, part, *, context=None, connection_factory=None):
+    context = context or _ssl_context()
+    connection_factory = connection_factory or _PinnedHTTPSConnection
+    current = url
+    for hop in range(MAX_REDIRECTS + 1):
+        parsed, pinned_ip = _resolve_public_https(current)
+        port = parsed.port or 443
+        connection = connection_factory(
+            parsed.hostname, port, pinned_ip, context=context, timeout=60)
+        response = None
+        try:
+            path = urlunsplit(('', '', parsed.path or '/', parsed.query, ''))
+            connection.request('GET', path, headers={
+                'Host': _host_header(parsed),
+                'User-Agent': 'paper-radar-sync/1.0',
+            })
+            response = connection.getresponse()
+            if 300 <= response.status < 400:
+                location = response.getheader('Location')
+                if not location:
+                    raise ValueError('redirect missing Location')
+                if hop >= MAX_REDIRECTS:
+                    raise ValueError('too many redirects')
+                current = urljoin(current, location)
+                continue
+            if not 200 <= response.status < 300:
+                raise _HttpStatusError(response.status)
+            part.write_bytes(_read_limited(response))
+            return
+        finally:
+            if response is not None:
+                response.close()
+            connection.close()
 
 def acquire_pdf(item, runner=subprocess.run):
     try:
         WORK_DIR.mkdir(exist_ok=True)
     except OSError as exc:
         return _result(error=f'filesystem: {exc}', retryable=True)
-    dest = WORK_DIR / cache_filename(item['item_id'])
-    if is_valid_pdf(dest):
+    item_id = item['item_id']
+    dest = WORK_DIR / cache_filename(item_id)
+    rejection = load_identity_rejection(item_id)
+    if rejection and rejection['attempts'] >= 2:
+        return _result(error='source_identity_mismatch')
+    rejected_sources = set()
+    rejected_routes = set()
+    if rejection:
+        rejected_sources = set(rejection.get('rejected_sources', []))
+        rejected_routes = set(rejection.get('rejected_routes', []))
+        rejection['attempts'] = 2
+        try:
+            _write_identity_rejection(rejection)
+        except OSError:
+            return _result(error='source_identity_mismatch')
+
+    if not rejection and is_valid_pdf(dest):
         return _result(dest, 'cache', 'cache')
     errors = []
     retryable = False
 
-    if item.get('pdf_key'):
+    if item.get('pdf_key') and not ({'r2'} & (rejected_sources | rejected_routes)):
         if not valid_pdf_key(item['pdf_key']):
             errors.append('r2: invalid pdf_key')
         else:
@@ -315,12 +503,14 @@ def acquire_pdf(item, runner=subprocess.run):
                 return _result(dest, 'r2', 'r2')
             except Exception as exc:
                 errors.append(f'r2: {_short_error(exc, exc.__class__.__name__)}')
-                retryable = retryable or isinstance(
-                    exc, (OSError, RuntimeError, subprocess.TimeoutExpired))
+                retryable = retryable or _retryable_error(exc)
             finally:
                 _cleanup_part(part)
 
-    if item.get('oa_pdf_url'):
+    elif item.get('pdf_key'):
+        errors.append('r2: skipped source_identity_mismatch')
+
+    if item.get('oa_pdf_url') and not ({'oa-url'} & (rejected_sources | rejected_routes)):
         part = _part_for(dest)
         try:
             _download_oa_pdf(item['oa_pdf_url'], part)
@@ -328,12 +518,17 @@ def acquire_pdf(item, runner=subprocess.run):
             return _result(dest, 'oa-url', 'oa-url')
         except Exception as exc:
             errors.append(f'oa-url: {_short_error(exc, exc.__class__.__name__)}')
-            retryable = retryable or isinstance(
-                exc, (OSError, RuntimeError, subprocess.TimeoutExpired))
+            retryable = retryable or _retryable_error(exc)
         finally:
             _cleanup_part(part)
 
-    if item.get('doi'):
+    elif item.get('oa_pdf_url'):
+        errors.append('oa-url: skipped source_identity_mismatch')
+
+    fetch_rejected = (
+        'paper-fetch' in rejected_sources
+        or bool(rejected_routes - {'cache', 'r2', 'oa-url'}))
+    if item.get('doi') and not fetch_rejected:
         fetched = run_paper_fetch(item['doi'], dest, runner=runner)
         if fetched['pdf']:
             return fetched
@@ -341,7 +536,10 @@ def acquire_pdf(item, runner=subprocess.run):
         return _result(
             None, 'missing', None, '; '.join(errors), retryable or fetched['retryable'])
 
-    errors.append('no DOI available for fallback fetch')
+    if item.get('doi') and fetch_rejected:
+        errors.append('paper-fetch: skipped source_identity_mismatch')
+    else:
+        errors.append('no DOI available for fallback fetch')
     return _result(None, 'missing', None, '; '.join(errors), retryable)
 
 def cmd_pending():
@@ -363,15 +561,34 @@ def cmd_pending():
         print(f'  - {w["title"][:70]}  ({w["item_id"]})')
 
 def main():
-    if len(sys.argv) < 2 or sys.argv[1] not in ('pending', 'done'):
+    commands = ('pending', 'done', 'reject', 'accept', 'reset-rejection')
+    if len(sys.argv) < 2 or sys.argv[1] not in commands:
         print(__doc__); sys.exit(1)
-    if sys.argv[1] == 'pending':
+    command = sys.argv[1]
+    if command == 'pending':
         cmd_pending()
-    else:
+    elif command == 'done':
         if len(sys.argv) < 3:
             print('用法: paper_sync.py done <item_id> [...]'); sys.exit(1)
         mark_synced(sys.argv[2:])
         print(f'已標 synced: {len(sys.argv) - 2} 篇')
+    elif command == 'reject':
+        if len(sys.argv) < 6:
+            print('用法: paper_sync.py reject <item_id> <source> <route|-> <reason>')
+            sys.exit(1)
+        route = None if sys.argv[4] == '-' else sys.argv[4]
+        state = record_identity_rejection(
+            sys.argv[2], source=sys.argv[3], route=route,
+            reason=' '.join(sys.argv[5:]))
+        print(json.dumps(state, ensure_ascii=False))
+    else:
+        if len(sys.argv) != 3:
+            print(f'用法: paper_sync.py {command} <item_id>'); sys.exit(1)
+        if command == 'accept':
+            accept_identity(sys.argv[2])
+        else:
+            reset_identity_rejection(sys.argv[2])
+        print(f'local marker cleared: {sys.argv[2]}')
 
 if __name__ == '__main__':
     main()
