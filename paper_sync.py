@@ -305,10 +305,13 @@ def run_paper_fetch(doi, dest, runner=subprocess.run):
                 error = proc.stderr
             result['fetch_error'] = _short_error(
                 error, 'no route' if proc.returncode == 2 else 'paper-fetch failed')
-            result['retryable'] = (
-                proc.returncode not in (1, 2)
-                or (proc.returncode == 2 and bool(envelope.get('error')))
-            )
+            child_retryable = envelope.get('retryable')
+            if isinstance(child_retryable, bool):
+                result['retryable'] = child_retryable
+            elif proc.returncode == 2:
+                result['retryable'] = False
+            else:
+                result['retryable'] = proc.returncode not in (1, 2)
             return result
         if not is_valid_pdf(part):
             result['fetch_error'] = 'fetcher returned a non-PDF payload'
@@ -480,13 +483,8 @@ def acquire_pdf(item, runner=subprocess.run):
     if rejection:
         rejected_sources = set(rejection.get('rejected_sources', []))
         rejected_routes = set(rejection.get('rejected_routes', []))
-        rejection['attempts'] = 2
-        try:
-            _write_identity_rejection(rejection)
-        except OSError:
-            return _result(error='source_identity_mismatch')
 
-    if not rejection and is_valid_pdf(dest):
+    if is_valid_pdf(dest):
         return _result(dest, 'cache', 'cache')
     errors = []
     retryable = False

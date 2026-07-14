@@ -486,6 +486,57 @@ def test_run_paper_fetch_route_exhausted_does_not_dump_multiline_stderr(tmp_path
     assert result['retryable'] is False
 
 
+@pytest.mark.parametrize('error', [
+    'invalid resolver template: missing doi',
+    'invalid DOI: not-a-doi',
+    'invalid output path',
+    'resolver request timeout',
+    'HTTP 429 too many requests',
+    'HTTP 503 service unavailable',
+    'temporary network failure',
+    'unknown route failure',
+])
+def test_run_paper_fetch_exit_two_without_typed_retryability_fails_closed(
+        tmp_path, error):
+    dest = tmp_path / 'paper.pdf'
+
+    def failed_runner(cmd, **kwargs):
+        return CompletedProcess(
+            cmd, 2, stdout=json.dumps({'ok': False, 'error': error}), stderr='')
+
+    result = paper_sync.run_paper_fetch('10.1234/test', dest, runner=failed_runner)
+    assert result['retryable'] is False
+
+
+@pytest.mark.parametrize(('typed', 'error'), [
+    (True, 'permanent child wording'),
+    (False, 'request timeout'),
+])
+def test_run_paper_fetch_prefers_typed_child_retryability(tmp_path, typed, error):
+    dest = tmp_path / 'paper.pdf'
+
+    def failed_runner(cmd, **kwargs):
+        return CompletedProcess(cmd, 2, stdout=json.dumps({
+            'ok': False, 'error': error, 'retryable': typed,
+        }), stderr='')
+
+    result = paper_sync.run_paper_fetch('10.1234/test', dest, runner=failed_runner)
+    assert result['retryable'] is typed
+
+
+@pytest.mark.parametrize('typed', [None, 0, 1, 'true', [], {}])
+def test_run_paper_fetch_rejects_non_boolean_child_retryability(tmp_path, typed):
+    dest = tmp_path / 'paper.pdf'
+
+    def failed_runner(cmd, **kwargs):
+        return CompletedProcess(cmd, 2, stdout=json.dumps({
+            'ok': False, 'error': 'request timeout', 'retryable': typed,
+        }), stderr='')
+
+    result = paper_sync.run_paper_fetch('10.1234/test', dest, runner=failed_runner)
+    assert result['retryable'] is False
+
+
 def test_run_paper_fetch_bounds_unexpected_multiline_stderr(tmp_path):
     dest = tmp_path / 'paper.pdf'
 
@@ -641,7 +692,9 @@ def test_acquire_pdf_accumulates_failures_before_paper_fetch(tmp_path, monkeypat
 
     def failed_runner(cmd, **kwargs):
         return CompletedProcess(
-            cmd, 2, stdout='{"ok": false, "error": "routes exhausted"}', stderr='')
+            cmd, 2, stdout=(
+                '{"ok": false, "error": "routes exhausted", "retryable": true}'),
+            stderr='')
 
     result = paper_sync.acquire_pdf({
         'item_id': 'doi:10.1234/test', 'pdf_key': 'pdf/test.pdf',
@@ -771,8 +824,10 @@ def test_repeated_identity_rejections_use_unique_quarantine_names(identity_dirs)
     item_id = 'manual:identity-unique'
     cache = work_dir / paper_sync.cache_filename(item_id)
     cache.write_bytes(b'%PDF' + b'a' * 3000)
-    paper_sync.record_identity_rejection(
+    first = paper_sync.record_identity_rejection(
         item_id, source='r2', route='r2', reason='first mismatch')
+    assert first['attempts'] == 1
+    assert paper_sync.load_identity_rejection(item_id)['attempts'] == 1
     cache.write_bytes(b'%PDF' + b'b' * 3000)
 
     state = paper_sync.record_identity_rejection(
@@ -815,7 +870,7 @@ def test_identity_marker_survives_fresh_module_session_and_blocks_network(
     }
 
 
-def test_first_identity_rejection_skips_rejected_source_and_reserves_one_reacquire(
+def test_first_identity_rejection_skips_rejected_source_without_counting_reacquire(
         identity_dirs, monkeypatch):
     work_dir, _ = identity_dirs
     item_id = 'manual:identity-skip'
@@ -835,11 +890,23 @@ def test_first_identity_rejection_skips_rejected_source_and_reserves_one_reacqui
     })
 
     assert result['pdf_source'] == 'oa-url'
-    assert paper_sync.load_identity_rejection(item_id)['attempts'] == 2
+    assert paper_sync.load_identity_rejection(item_id)['attempts'] == 1
     assert Path(result['pdf']) == work_dir / paper_sync.cache_filename(item_id)
 
+    monkeypatch.setattr(
+        paper_sync, '_download_oa_pdf',
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError('replacement cache must be returned before network')))
+    cached = paper_sync.acquire_pdf({
+        'item_id': item_id, 'pdf_key': 'pdf/test.pdf',
+        'oa_pdf_url': 'https://example.test/paper.pdf', 'doi': '',
+    })
+    assert cached['pdf_source'] == 'cache'
+    assert cached['pdf'] == result['pdf']
+    assert paper_sync.load_identity_rejection(item_id)['attempts'] == 1
 
-def test_reserved_reacquire_makes_next_acquire_terminal_without_network(
+
+def test_transient_reacquire_failure_keeps_attempt_one_and_can_retry_remaining_source(
         identity_dirs, monkeypatch):
     item_id = 'manual:identity-once'
     paper_sync.record_identity_rejection(
@@ -853,17 +920,15 @@ def test_reserved_reacquire_makes_next_acquire_terminal_without_network(
     }
     first = paper_sync.acquire_pdf(item)
     assert first['retryable'] is True
+    assert paper_sync.load_identity_rejection(item_id)['attempts'] == 1
 
-    monkeypatch.setattr(
-        paper_sync, '_wrangler',
-        lambda args: (_ for _ in ()).throw(AssertionError('network must not run')))
-    monkeypatch.setattr(
-        paper_sync, '_download_oa_pdf',
-        lambda *args, **kwargs: (_ for _ in ()).throw(
-            AssertionError('network must not run')))
+    def download(url, part):
+        Path(part).write_bytes(b'%PDF' + b'x' * 3000)
+
+    monkeypatch.setattr(paper_sync, '_download_oa_pdf', download)
     second = paper_sync.acquire_pdf(item)
-    assert second['fetch_error'] == 'source_identity_mismatch'
-    assert second['retryable'] is False
+    assert second['pdf_source'] == 'oa-url'
+    assert paper_sync.load_identity_rejection(item_id)['attempts'] == 1
 
 
 def test_accept_and_reset_clear_identity_marker(identity_dirs):
