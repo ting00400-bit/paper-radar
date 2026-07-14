@@ -8,9 +8,11 @@
 注意：wrangler 走本機 OAuth（有 D1 寫入權）。subprocess 會拿掉 CLOUDFLARE_API_TOKEN，
 避免誤吃 .env 的 NAS 唯讀 token。
 """
-import json, os, re, subprocess, sys, uuid
+import hashlib, ipaddress, json, os, re, socket, ssl, subprocess, sys, uuid
+import urllib.request
 from collections.abc import Mapping
 from pathlib import Path
+from urllib.parse import urlsplit
 
 REPO = Path(__file__).resolve().parent
 PAPER_FETCH = REPO.parents[1] / '700_Scripts' / 'paper-fetch' / 'paper_fetch.py'
@@ -19,7 +21,9 @@ WORK_DIR = REPO / '_sync_tmp'                               # PDF 暫存＋workl
 D1_NAME = 'paper-radar-db'
 R2_BUCKET = 'paper-radar-pdfs'
 MIN_PDF_BYTES = 1000
+MAX_PDF_BYTES = 100 * 1024 * 1024
 MAX_ERROR_CHARS = 300
+MAX_R2_KEY_CHARS = 512
 PENDING_SQL = (
     'SELECT item_id, doi, title, star, deepread, content, pdf_key '
     'FROM actions WHERE synced=0 '
@@ -32,6 +36,12 @@ def sanitize_filename(s):
     s = _ILLEGAL.sub('', s or '')
     s = re.sub(r'\s+', ' ', s).strip()
     return s.rstrip(' .')
+
+def cache_filename(item_id):
+    raw = str(item_id or '')
+    label = sanitize_filename(raw).replace(' ', '_')[:80] or 'item'
+    digest = hashlib.sha256(raw.encode('utf-8')).hexdigest()
+    return f'{label}-{digest}.pdf'
 
 def short_title(title, limit=60):
     t = sanitize_filename(title)
@@ -109,7 +119,11 @@ def _wrangler(args):
     r = subprocess.run(['npx', '--yes', 'wrangler'] + args, cwd=_runner_dir(), env=env,
                        capture_output=True, text=True, encoding='utf-8', shell=(os.name == 'nt'))
     if r.returncode != 0:
-        raise RuntimeError(f'wrangler {" ".join(args)} failed:\n{r.stderr}')
+        command = _short_error(' '.join(args), '(empty)')
+        raise RuntimeError(
+            f'wrangler {command} failed (exit {r.returncode}); '
+            f'stdout: {_short_error(r.stdout, "(empty)")}; '
+            f'stderr: {_short_error(r.stderr, "(empty)")}')
     return r.stdout
 
 def _sql_quote(s):
@@ -117,10 +131,16 @@ def _sql_quote(s):
 
 # item_id 白名單：實際格式只有 doi:*/h:*/manual:*（字元含 \w : . / ( ) -）。
 # D1 的 item_id 是網站寫入的，這裡擋掉任何長相可疑的值，避免流進 SQL 拼接。
-_ID_OK = re.compile(r'^[\w:./()\-]{1,64}$')
+_ID_OK = re.compile(r'(?=.{1,64}\Z)(?:doi|h|manual):[A-Za-z0-9_:./()\-]+', re.ASCII)
+_PDF_KEY_PART = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]*', re.ASCII)
 
 def valid_item_id(s):
-    return bool(_ID_OK.match(s or ''))
+    return isinstance(s, str) and bool(_ID_OK.fullmatch(s))
+
+def valid_pdf_key(key):
+    if not isinstance(key, str) or not key or len(key) > MAX_R2_KEY_CHARS:
+        return False
+    return all(_PDF_KEY_PART.fullmatch(part) for part in key.split('/'))
 
 def is_valid_pdf(path):
     p = Path(path)
@@ -214,46 +234,96 @@ def _promote_pdf(part, dest):
         raise ValueError('downloaded payload is not a valid PDF')
     part.replace(dest)
 
+def _validate_oa_url(url):
+    parsed = urlsplit(str(url or ''))
+    if parsed.scheme.lower() != 'https' or not parsed.hostname:
+        raise ValueError('oa_pdf_url must use HTTPS with a hostname')
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError('oa_pdf_url must not contain credentials')
+    try:
+        port = parsed.port or 443
+    except ValueError as exc:
+        raise ValueError('oa_pdf_url has an invalid port') from exc
+
+    host = parsed.hostname
+    try:
+        addresses = {ipaddress.ip_address(host)}
+    except ValueError:
+        resolved = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+        addresses = {
+            ipaddress.ip_address(info[4][0].split('%', 1)[0]) for info in resolved
+        }
+    if not addresses or any(not address.is_global for address in addresses):
+        raise ValueError('oa_pdf_url resolved to a non-public address')
+    return url
+
+class _ValidatingRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        _validate_oa_url(newurl)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+def _read_limited(response, limit=MAX_PDF_BYTES):
+    raw_length = response.headers.get('Content-Length')
+    if raw_length:
+        try:
+            declared = int(raw_length)
+        except ValueError as exc:
+            raise ValueError('invalid Content-Length') from exc
+        if declared < 0 or declared > limit:
+            raise ValueError('PDF exceeds maximum size')
+    data = response.read(limit + 1)
+    if len(data) > limit:
+        raise ValueError('PDF exceeds maximum size')
+    return data
+
+def _download_oa_pdf(url, part):
+    _validate_oa_url(url)
+    try:
+        import certifi
+        ctx = ssl.create_default_context(cafile=certifi.where())
+    except ImportError:
+        ctx = ssl.create_default_context()
+    opener = urllib.request.build_opener(
+        urllib.request.HTTPSHandler(context=ctx), _ValidatingRedirectHandler())
+    request = urllib.request.Request(
+        url, headers={'User-Agent': 'paper-radar-sync/1.0'})
+    with opener.open(request, timeout=60) as response:
+        final_url = response.geturl() if hasattr(response, 'geturl') else url
+        _validate_oa_url(final_url)
+        part.write_bytes(_read_limited(response))
+
 def acquire_pdf(item, runner=subprocess.run):
     try:
         WORK_DIR.mkdir(exist_ok=True)
     except OSError as exc:
         return _result(error=f'filesystem: {exc}', retryable=True)
-    dest = WORK_DIR / (sanitize_filename(item['item_id']).replace(' ', '_') + '.pdf')
+    dest = WORK_DIR / cache_filename(item['item_id'])
     if is_valid_pdf(dest):
         return _result(dest, 'cache', 'cache')
     errors = []
     retryable = False
 
     if item.get('pdf_key'):
-        part = _part_for(dest)
-        try:
-            _wrangler(['r2', 'object', 'get', f"{R2_BUCKET}/{item['pdf_key']}",
-                       '--file', str(part), '--remote'])
-            _promote_pdf(part, dest)
-            return _result(dest, 'r2', 'r2')
-        except Exception as exc:
-            errors.append(f'r2: {_short_error(exc, exc.__class__.__name__)}')
-            retryable = retryable or isinstance(
-                exc, (OSError, RuntimeError, subprocess.TimeoutExpired))
-        finally:
-            _cleanup_part(part)
+        if not valid_pdf_key(item['pdf_key']):
+            errors.append('r2: invalid pdf_key')
+        else:
+            part = _part_for(dest)
+            try:
+                _wrangler(['r2', 'object', 'get', f"{R2_BUCKET}/{item['pdf_key']}",
+                           '--file', str(part), '--remote'])
+                _promote_pdf(part, dest)
+                return _result(dest, 'r2', 'r2')
+            except Exception as exc:
+                errors.append(f'r2: {_short_error(exc, exc.__class__.__name__)}')
+                retryable = retryable or isinstance(
+                    exc, (OSError, RuntimeError, subprocess.TimeoutExpired))
+            finally:
+                _cleanup_part(part)
 
     if item.get('oa_pdf_url'):
-        import ssl
-        import urllib.request
         part = _part_for(dest)
         try:
-            try:
-                import certifi
-                ctx = ssl.create_default_context(cafile=certifi.where())
-            except ImportError:
-                ctx = ssl.create_default_context()
-            req = urllib.request.Request(
-                item['oa_pdf_url'], headers={'User-Agent': 'paper-radar-sync/1.0'}
-            )
-            with urllib.request.urlopen(req, timeout=60, context=ctx) as response:
-                part.write_bytes(response.read())
+            _download_oa_pdf(item['oa_pdf_url'], part)
             _promote_pdf(part, dest)
             return _result(dest, 'oa-url', 'oa-url')
         except Exception as exc:

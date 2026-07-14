@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 """paper_sync 純函數測試。跑法：python -X utf8 -m pytest tests/ -v"""
+import hashlib
 import json
+import socket
 import sys, os
 import urllib.request
 from pathlib import Path
@@ -107,6 +109,124 @@ def test_valid_item_id_allowlist():
     assert not valid_item_id("x'); DROP TABLE actions;--")
     assert not valid_item_id('')
     assert not valid_item_id('a' * 65)
+    assert not valid_item_id('anything')
+    assert not valid_item_id('manual:1751700000\n')
+
+
+def test_cache_filename_hashes_full_item_id_to_avoid_sanitize_collisions():
+    first = 'doi:10.1000/a/bc'
+    second = 'doi:10.1000/ab/c'
+    assert sanitize_filename(first) == sanitize_filename(second)
+
+    first_name = paper_sync.cache_filename(first)
+    second_name = paper_sync.cache_filename(second)
+
+    assert first_name != second_name
+    assert hashlib.sha256(first.encode('utf-8')).hexdigest() in first_name
+    assert hashlib.sha256(second.encode('utf-8')).hexdigest() in second_name
+
+
+def test_wrangler_failure_preserves_bounded_stdout_and_stderr(tmp_path, monkeypatch):
+    monkeypatch.setattr(paper_sync, '_runner_dir', lambda: tmp_path)
+
+    def failed_run(*args, **kwargs):
+        return CompletedProcess(
+            args[0], 7, stdout=('stdout detail\n' * 1000),
+            stderr=('stderr detail\n' * 1000))
+
+    monkeypatch.setattr(paper_sync.subprocess, 'run', failed_run)
+    with pytest.raises(RuntimeError) as exc_info:
+        paper_sync._wrangler(['d1', 'execute', 'x' * 5000])
+
+    message = str(exc_info.value)
+    assert 'exit 7' in message
+    assert 'stdout: stdout detail' in message
+    assert 'stderr: stderr detail' in message
+    assert len(message) < 1000
+
+
+@pytest.mark.parametrize('url', [
+    'http://example.test/paper.pdf',
+    'https://127.0.0.1/paper.pdf',
+    'https://10.0.0.1/paper.pdf',
+    'https://169.254.1.1/paper.pdf',
+    'https://[::1]/paper.pdf',
+])
+def test_validate_oa_url_rejects_non_https_and_non_global_ips(url):
+    with pytest.raises(ValueError):
+        paper_sync._validate_oa_url(url)
+
+
+def test_validate_oa_url_rejects_hostname_resolving_to_private_ip(monkeypatch):
+    monkeypatch.setattr(socket, 'getaddrinfo', lambda *args, **kwargs: [
+        (socket.AF_INET, socket.SOCK_STREAM, 6, '', ('192.168.1.5', 443)),
+    ])
+    with pytest.raises(ValueError):
+        paper_sync._validate_oa_url('https://papers.example.test/article.pdf')
+
+
+def test_validate_oa_url_accepts_hostname_resolving_to_global_ip(monkeypatch):
+    monkeypatch.setattr(socket, 'getaddrinfo', lambda *args, **kwargs: [
+        (socket.AF_INET, socket.SOCK_STREAM, 6, '', ('93.184.216.34', 443)),
+    ])
+    url = 'https://papers.example.test/article.pdf'
+    assert paper_sync._validate_oa_url(url) == url
+
+
+def test_redirect_handler_validates_each_redirect_target(monkeypatch):
+    seen = []
+    monkeypatch.setattr(paper_sync, '_validate_oa_url', seen.append, raising=False)
+    request = urllib.request.Request('https://example.test/start.pdf')
+
+    redirected = paper_sync._ValidatingRedirectHandler().redirect_request(
+        request, None, 302, 'Found', {}, 'https://cdn.example.test/final.pdf')
+
+    assert redirected.full_url == 'https://cdn.example.test/final.pdf'
+    assert seen == ['https://cdn.example.test/final.pdf']
+
+
+def test_read_limited_rejects_payload_over_limit():
+    class Response:
+        headers = {}
+
+        def read(self, size):
+            assert size == 9
+            return b'x' * size
+
+    with pytest.raises(ValueError, match='maximum size'):
+        paper_sync._read_limited(Response(), limit=8)
+
+
+@pytest.mark.parametrize('key', [
+    '../secret.pdf',
+    'pdf/../secret.pdf',
+    r'pdf\secret.pdf',
+    'pdf/paper.pdf & whoami',
+    '/absolute/paper.pdf',
+    'pdf//paper.pdf',
+])
+def test_valid_pdf_key_rejects_path_escape_and_shell_metacharacters(key):
+    assert paper_sync.valid_pdf_key(key) is False
+
+
+def test_valid_pdf_key_accepts_conservative_r2_path():
+    assert paper_sync.valid_pdf_key('pdf/2026/paper-123_v2.pdf') is True
+
+
+def test_acquire_pdf_rejects_unsafe_pdf_key_before_wrangler(tmp_path, monkeypatch):
+    monkeypatch.setattr(paper_sync, 'WORK_DIR', tmp_path)
+    monkeypatch.setattr(
+        paper_sync, '_wrangler',
+        lambda args: (_ for _ in ()).throw(AssertionError('wrangler must not run')))
+
+    result = paper_sync.acquire_pdf({
+        'item_id': 'manual:unsafe-key', 'pdf_key': 'pdf/x.pdf & whoami',
+        'oa_pdf_url': None, 'doi': '',
+    })
+
+    assert result['pdf'] is None
+    assert result['retryable'] is False
+    assert 'invalid pdf_key' in result['fetch_error']
 
 def test_build_worklist_pdf_source_priority():
     assert build_worklist(rows(pdf_key='pdf/x.pdf'), PAPERS)[0]['pdf_source'] == 'r2'  # 這篇 meta 也有 oa_pdf_url → 驗證 r2 優先
@@ -271,7 +391,7 @@ def test_run_paper_fetch_rejects_html_even_when_json_says_ok(tmp_path):
 
 def test_acquire_pdf_uses_valid_cache_before_other_sources(tmp_path, monkeypatch):
     monkeypatch.setattr(paper_sync, 'WORK_DIR', tmp_path)
-    dest = tmp_path / 'doi10.1234test.pdf'
+    dest = tmp_path / paper_sync.cache_filename('doi:10.1234/test')
     dest.write_bytes(b'%PDF' + b'x' * 3000)
     monkeypatch.setattr(paper_sync, '_wrangler',
                         lambda args: (_ for _ in ()).throw(AssertionError('R2 called')))
@@ -291,7 +411,7 @@ def test_acquire_pdf_uses_valid_cache_before_other_sources(tmp_path, monkeypatch
 
 def test_acquire_pdf_replace_failure_preserves_stale_destination(tmp_path, monkeypatch):
     monkeypatch.setattr(paper_sync, 'WORK_DIR', tmp_path)
-    dest = tmp_path / 'doi10.1234test.pdf'
+    dest = tmp_path / paper_sync.cache_filename('doi:10.1234/test')
     old = b'<html>old stale destination'
     dest.write_bytes(old)
     original_replace = Path.replace
@@ -364,7 +484,7 @@ def test_acquire_pdf_cleanup_permission_error_does_not_abort(tmp_path, monkeypat
 
 def test_acquire_pdf_falls_back_from_invalid_r2_to_oa(tmp_path, monkeypatch):
     monkeypatch.setattr(paper_sync, 'WORK_DIR', tmp_path)
-    dest = tmp_path / 'doi10.1234test.pdf'
+    dest = tmp_path / paper_sync.cache_filename('doi:10.1234/test')
     calls = []
 
     def fake_wrangler(args):
@@ -373,19 +493,11 @@ def test_acquire_pdf_falls_back_from_invalid_r2_to_oa(tmp_path, monkeypatch):
         assert part != dest
         part.write_bytes(b'<html>' + b'x' * 3000)
 
-    class Response:
-        def __enter__(self):
-            calls.append('oa')
-            return self
-
-        def __exit__(self, *args):
-            pass
-
-        def read(self):
-            return b'%PDF' + b'x' * 3000
-
     monkeypatch.setattr(paper_sync, '_wrangler', fake_wrangler)
-    monkeypatch.setattr(urllib.request, 'urlopen', lambda *args, **kwargs: Response())
+    def fake_download(url, part):
+        calls.append('oa')
+        Path(part).write_bytes(b'%PDF' + b'x' * 3000)
+    monkeypatch.setattr(paper_sync, '_download_oa_pdf', fake_download, raising=False)
     result = paper_sync.acquire_pdf({
         'item_id': 'doi:10.1234/test', 'pdf_key': 'pdf/test.pdf',
         'oa_pdf_url': 'https://example.test/test.pdf', 'doi': '10.1234/test',
@@ -401,8 +513,9 @@ def test_acquire_pdf_accumulates_failures_before_paper_fetch(tmp_path, monkeypat
     monkeypatch.setattr(paper_sync, 'WORK_DIR', tmp_path)
     monkeypatch.setattr(paper_sync, '_wrangler',
                         lambda args: (_ for _ in ()).throw(RuntimeError('R2 unavailable')))
-    monkeypatch.setattr(urllib.request, 'urlopen',
-                        lambda *args, **kwargs: (_ for _ in ()).throw(OSError('OA unavailable')))
+    monkeypatch.setattr(
+        paper_sync, '_download_oa_pdf',
+        lambda *args, **kwargs: (_ for _ in ()).throw(OSError('OA unavailable')))
 
     def failed_runner(cmd, **kwargs):
         return CompletedProcess(
@@ -426,8 +539,9 @@ def test_acquire_pdf_marks_r2_and_oa_only_transient_failures_retryable(
     monkeypatch.setattr(paper_sync, 'WORK_DIR', tmp_path)
     monkeypatch.setattr(paper_sync, '_wrangler',
                         lambda args: (_ for _ in ()).throw(OSError('R2 timeout')))
-    monkeypatch.setattr(urllib.request, 'urlopen',
-                        lambda *args, **kwargs: (_ for _ in ()).throw(OSError('OA timeout')))
+    monkeypatch.setattr(
+        paper_sync, '_download_oa_pdf',
+        lambda *args, **kwargs: (_ for _ in ()).throw(OSError('OA timeout')))
     result = paper_sync.acquire_pdf({
         'item_id': 'manual:transient', 'pdf_key': 'pdf/test.pdf',
         'oa_pdf_url': 'https://example.test/test.pdf', 'doi': '',
