@@ -16,6 +16,11 @@ PAPERS_JSON = Path(r'Z:/docker/paper-radar/papers.json')   # NAS canonical
 WORK_DIR = REPO / '_sync_tmp'                               # PDF 暫存＋worklist
 D1_NAME = 'paper-radar-db'
 R2_BUCKET = 'paper-radar-pdfs'
+PENDING_SQL = (
+    'SELECT item_id, doi, title, star, deepread, content, pdf_key '
+    'FROM actions WHERE synced=0 '
+    'AND (deepread=1 OR content=1 OR star=1)'
+)
 
 _ILLEGAL = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
 
@@ -47,9 +52,8 @@ def build_worklist(pending_rows, papers_data):
         meta = by_id.get(r['item_id'], {})
         content = bool(r.get('content'))
         deepread = bool(r.get('deepread'))
-        if not content and not deepread:
-            content = True                      # 只按筆記沒分類 → 預設兩段都寫
-            deepread = True
+        if not content and not deepread and bool(r.get('star')):
+            content = True
         item = {
             'item_id': r['item_id'],
             'title': meta.get('title') or r.get('title') or '',
@@ -115,9 +119,9 @@ def valid_item_id(s):
     return bool(_ID_OK.match(s or ''))
 
 def query_pending():
-    out = _wrangler(['d1', 'execute', D1_NAME, '--remote', '--json', '--command',
-                     'SELECT item_id, doi, title, star, deepread, content, pdf_key '
-                     'FROM actions WHERE synced=0 AND star=1'])
+    out = _wrangler([
+        'd1', 'execute', D1_NAME, '--remote', '--json', '--command', PENDING_SQL
+    ])
     data = json.loads(out[out.index('['):])       # wrangler 前面可能有雜訊行
     return data[0]['results']
 
@@ -160,7 +164,7 @@ def fetch_pdf(item):
 def cmd_pending():
     rows = query_pending()
     if not rows:
-        print('沒有待整理的論文（star=1 且 synced=0）。')
+        print('沒有待整理的論文（content/deepread/legacy star 均為 0，或已 synced）')
         return
     papers = json.loads(PAPERS_JSON.read_text(encoding='utf-8'))
     wl = build_worklist(rows, papers)

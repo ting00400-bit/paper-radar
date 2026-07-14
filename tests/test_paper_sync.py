@@ -1,7 +1,9 @@
 # -*- coding: utf-8 -*-
 """paper_sync 純函數測試。跑法：python -X utf8 -m pytest tests/ -v"""
+import json
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import paper_sync
 from paper_sync import sanitize_filename, short_title, first_author_surname, note_filename, build_worklist, valid_item_id
 
 def test_sanitize_removes_windows_illegal_chars():
@@ -63,9 +65,25 @@ def test_build_worklist_merges_metadata():
     assert wl[0]['content'] is True and wl[0]['deepread'] is False
     assert wl[0]['note_filename'].startswith('2026-06-28 Regidor - Paper A')
 
-def test_build_worklist_default_both_when_no_flags():
-    wl = build_worklist(rows(content=0, deepread=0), PAPERS)
-    assert wl[0]['content'] is True and wl[0]['deepread'] is True   # 只按筆記沒分類 → 兩段都寫
+def test_build_worklist_legacy_star_only_maps_to_content():
+    wl = build_worklist(rows(star=1, content=0, deepread=0), PAPERS)
+    assert wl[0]['content'] is True
+    assert wl[0]['deepread'] is False
+
+def test_build_worklist_deepread_only_stays_deepread_only():
+    wl = build_worklist(rows(star=0, content=0, deepread=1), PAPERS)
+    assert wl[0]['content'] is False
+    assert wl[0]['deepread'] is True
+
+def test_query_pending_selects_typed_and_legacy_requests(monkeypatch):
+    captured = {}
+    def fake_wrangler(args):
+        captured['sql'] = args[-1]
+        return json.dumps([{'results': []}])
+    monkeypatch.setattr(paper_sync, '_wrangler', fake_wrangler)
+    assert paper_sync.query_pending() == []
+    assert '(deepread=1 OR content=1 OR star=1)' in captured['sql']
+    assert 'synced=0' in captured['sql']
 
 def test_build_worklist_respects_explicit_content_only():
     wl = build_worklist(rows(content=1, deepread=0), PAPERS)
