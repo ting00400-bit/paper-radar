@@ -9,6 +9,7 @@
 避免誤吃 .env 的 NAS 唯讀 token。
 """
 import json, os, re, subprocess, sys, uuid
+from collections.abc import Mapping
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent
@@ -18,6 +19,7 @@ WORK_DIR = REPO / '_sync_tmp'                               # PDF 暫存＋workl
 D1_NAME = 'paper-radar-db'
 R2_BUCKET = 'paper-radar-pdfs'
 MIN_PDF_BYTES = 1000
+MAX_ERROR_CHARS = 300
 PENDING_SQL = (
     'SELECT item_id, doi, title, star, deepread, content, pdf_key '
     'FROM actions WHERE synced=0 '
@@ -127,6 +129,16 @@ def is_valid_pdf(path):
     except OSError:
         return False
 
+def _cleanup_part(part):
+    try:
+        part.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+def _short_error(value, default='no route'):
+    text = ' '.join(str(value or '').split()) or default
+    return text[:MAX_ERROR_CHARS]
+
 def run_paper_fetch(doi, dest, runner=subprocess.run):
     dest = Path(dest)
     part = dest.with_name(f'{dest.stem}.{uuid.uuid4().hex}.part')
@@ -139,11 +151,14 @@ def run_paper_fetch(doi, dest, runner=subprocess.run):
         )
         lines = [line for line in proc.stdout.splitlines() if line.strip()]
         envelope = json.loads(lines[-1]) if lines else {}
+        if not isinstance(envelope, Mapping):
+            raise ValueError('paper-fetch returned invalid JSON envelope')
         if proc.returncode != 0 or not envelope.get('ok'):
-            result['fetch_error'] = (
-                envelope.get('error') or envelope.get('resolver_url')
-                or proc.stderr.strip() or 'no route'
-            )
+            error = envelope.get('error') or envelope.get('resolver_url')
+            if not error and proc.returncode != 2:
+                error = proc.stderr
+            result['fetch_error'] = _short_error(
+                error, 'no route' if proc.returncode == 2 else 'paper-fetch failed')
             result['retryable'] = (
                 proc.returncode not in (1, 2)
                 or (proc.returncode == 2 and bool(envelope.get('error')))
@@ -152,18 +167,20 @@ def run_paper_fetch(doi, dest, runner=subprocess.run):
         if not is_valid_pdf(part):
             result['fetch_error'] = 'fetcher returned a non-PDF payload'
             return result
-        dest.unlink(missing_ok=True)
         part.replace(dest)
         result.update(pdf=str(dest), fetch_route=envelope.get('route'))
         return result
     except subprocess.TimeoutExpired:
         result.update(fetch_error='paper-fetch timeout', retryable=True)
         return result
-    except (OSError, ValueError, json.JSONDecodeError) as exc:
-        result['fetch_error'] = str(exc)
+    except OSError as exc:
+        result.update(fetch_error=_short_error(exc), retryable=True)
+        return result
+    except (ValueError, json.JSONDecodeError) as exc:
+        result['fetch_error'] = _short_error(exc)
         return result
     finally:
-        part.unlink(missing_ok=True)
+        _cleanup_part(part)
 
 def query_pending():
     out = _wrangler([
@@ -195,16 +212,18 @@ def _part_for(dest):
 def _promote_pdf(part, dest):
     if not is_valid_pdf(part):
         raise ValueError('downloaded payload is not a valid PDF')
-    dest.unlink(missing_ok=True)
     part.replace(dest)
 
 def acquire_pdf(item, runner=subprocess.run):
-    WORK_DIR.mkdir(exist_ok=True)
+    try:
+        WORK_DIR.mkdir(exist_ok=True)
+    except OSError as exc:
+        return _result(error=f'filesystem: {exc}', retryable=True)
     dest = WORK_DIR / (sanitize_filename(item['item_id']).replace(' ', '_') + '.pdf')
     if is_valid_pdf(dest):
         return _result(dest, 'cache', 'cache')
-    dest.unlink(missing_ok=True)
     errors = []
+    retryable = False
 
     if item.get('pdf_key'):
         part = _part_for(dest)
@@ -214,9 +233,11 @@ def acquire_pdf(item, runner=subprocess.run):
             _promote_pdf(part, dest)
             return _result(dest, 'r2', 'r2')
         except Exception as exc:
-            errors.append(f'r2: {exc}')
+            errors.append(f'r2: {_short_error(exc, exc.__class__.__name__)}')
+            retryable = retryable or isinstance(
+                exc, (OSError, RuntimeError, subprocess.TimeoutExpired))
         finally:
-            part.unlink(missing_ok=True)
+            _cleanup_part(part)
 
     if item.get('oa_pdf_url'):
         import ssl
@@ -236,19 +257,22 @@ def acquire_pdf(item, runner=subprocess.run):
             _promote_pdf(part, dest)
             return _result(dest, 'oa-url', 'oa-url')
         except Exception as exc:
-            errors.append(f'oa-url: {exc}')
+            errors.append(f'oa-url: {_short_error(exc, exc.__class__.__name__)}')
+            retryable = retryable or isinstance(
+                exc, (OSError, RuntimeError, subprocess.TimeoutExpired))
         finally:
-            part.unlink(missing_ok=True)
+            _cleanup_part(part)
 
     if item.get('doi'):
         fetched = run_paper_fetch(item['doi'], dest, runner=runner)
         if fetched['pdf']:
             return fetched
         errors.append(f"paper-fetch: {fetched['fetch_error'] or 'no route'}")
-        return _result(None, 'missing', None, '; '.join(errors), fetched['retryable'])
+        return _result(
+            None, 'missing', None, '; '.join(errors), retryable or fetched['retryable'])
 
     errors.append('no DOI available for fallback fetch')
-    return _result(None, 'missing', None, '; '.join(errors), False)
+    return _result(None, 'missing', None, '; '.join(errors), retryable)
 
 def cmd_pending():
     rows = query_pending()

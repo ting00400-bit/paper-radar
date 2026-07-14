@@ -5,6 +5,7 @@ import sys, os
 import urllib.request
 from pathlib import Path
 from subprocess import CompletedProcess
+import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import paper_sync
 from paper_sync import sanitize_filename, short_title, first_author_surname, note_filename, build_worklist, valid_item_id
@@ -126,6 +127,8 @@ def test_run_paper_fetch_installs_unique_valid_result(tmp_path):
     def fake_runner(cmd, **kwargs):
         assert cmd[1:3] == ['-X', 'utf8']
         part = Path(cmd[-1])
+        assert part != dest
+        assert part.suffix == '.part'
         part.write_bytes(b'%PDF' + b'x' * 3000)
         env = {'schema': 1, 'doi': '10.1234/test', 'ok': True, 'route': 'unpaywall',
                'tried': ['unpaywall'], 'bytes': part.stat().st_size,
@@ -138,6 +141,85 @@ def test_run_paper_fetch_installs_unique_valid_result(tmp_path):
     assert paper_sync.is_valid_pdf(dest)
 
 
+def test_run_paper_fetch_uses_unique_part_for_each_attempt(tmp_path):
+    dest = tmp_path / 'paper.pdf'
+    parts = []
+
+    def fake_runner(cmd, **kwargs):
+        part = Path(cmd[-1])
+        parts.append(part)
+        part.write_bytes(b'%PDF' + b'x' * 3000)
+        return CompletedProcess(
+            cmd, 0, stdout='{"ok": true, "route": "unpaywall"}', stderr='')
+
+    assert paper_sync.run_paper_fetch('10.1234/test', dest, runner=fake_runner)['pdf']
+    assert paper_sync.run_paper_fetch('10.1234/test', dest, runner=fake_runner)['pdf']
+    assert len(set(parts)) == 2
+    assert all(part != dest and part.suffix == '.part' for part in parts)
+    assert not list(tmp_path.glob('*.part'))
+
+
+@pytest.mark.parametrize('stdout', ['null', '[]'])
+def test_run_paper_fetch_rejects_non_mapping_json_envelope(tmp_path, stdout):
+    dest = tmp_path / 'paper.pdf'
+
+    def fake_runner(cmd, **kwargs):
+        return CompletedProcess(cmd, 0, stdout=stdout, stderr='')
+
+    result = paper_sync.run_paper_fetch('10.1234/test', dest, runner=fake_runner)
+    assert set(result) == {'pdf', 'pdf_source', 'fetch_route', 'fetch_error', 'retryable'}
+    assert result['pdf'] is None
+    assert 'JSON envelope' in result['fetch_error']
+
+
+def test_run_paper_fetch_cleanup_permission_error_does_not_mask_success(
+        tmp_path, monkeypatch):
+    dest = tmp_path / 'paper.pdf'
+    original_unlink = Path.unlink
+
+    def locked_part_cleanup(path, *args, **kwargs):
+        if path.suffix == '.part':
+            raise PermissionError('part is locked')
+        return original_unlink(path, *args, **kwargs)
+
+    def fake_runner(cmd, **kwargs):
+        part = Path(cmd[-1])
+        part.write_bytes(b'%PDF' + b'x' * 3000)
+        return CompletedProcess(
+            cmd, 0, stdout='{"ok": true, "route": "unpaywall"}', stderr='')
+
+    monkeypatch.setattr(Path, 'unlink', locked_part_cleanup)
+    result = paper_sync.run_paper_fetch('10.1234/test', dest, runner=fake_runner)
+    assert result['pdf'] == str(dest)
+    assert paper_sync.is_valid_pdf(dest)
+
+
+def test_run_paper_fetch_replace_failure_preserves_destination(tmp_path, monkeypatch):
+    dest = tmp_path / 'paper.pdf'
+    old = b'<html>old stale destination'
+    dest.write_bytes(old)
+    original_replace = Path.replace
+
+    def failed_replace(path, target):
+        if path.suffix == '.part':
+            raise PermissionError('destination is locked')
+        return original_replace(path, target)
+
+    def fake_runner(cmd, **kwargs):
+        part = Path(cmd[-1])
+        part.write_bytes(b'%PDF' + b'x' * 3000)
+        return CompletedProcess(
+            cmd, 0, stdout='{"ok": true, "route": "unpaywall"}', stderr='')
+
+    monkeypatch.setattr(Path, 'replace', failed_replace)
+    result = paper_sync.run_paper_fetch('10.1234/test', dest, runner=fake_runner)
+    assert set(result) == {'pdf', 'pdf_source', 'fetch_route', 'fetch_error', 'retryable'}
+    assert result['pdf'] is None
+    assert result['retryable'] is True
+    assert dest.read_bytes() == old
+    assert not list(tmp_path.glob('*.part'))
+
+
 def test_run_paper_fetch_does_not_accept_stale_destination(tmp_path):
     dest = tmp_path / 'paper.pdf'
     dest.write_bytes(b'%PDF' + b'old' * 1000)
@@ -148,6 +230,31 @@ def test_run_paper_fetch_does_not_accept_stale_destination(tmp_path):
     result = paper_sync.run_paper_fetch('10.1234/test', dest, runner=failed_runner)
     assert result['pdf'] is None
     assert result['fetch_error']
+
+
+def test_run_paper_fetch_route_exhausted_does_not_dump_multiline_stderr(tmp_path):
+    dest = tmp_path / 'paper.pdf'
+
+    def failed_runner(cmd, **kwargs):
+        return CompletedProcess(
+            cmd, 2, stdout='{"ok": false}', stderr=('diagnostic line\n' * 1000))
+
+    result = paper_sync.run_paper_fetch('10.1234/test', dest, runner=failed_runner)
+    assert result['fetch_error'] == 'no route'
+    assert result['retryable'] is False
+
+
+def test_run_paper_fetch_bounds_unexpected_multiline_stderr(tmp_path):
+    dest = tmp_path / 'paper.pdf'
+
+    def failed_runner(cmd, **kwargs):
+        return CompletedProcess(
+            cmd, 3, stdout='{"ok": false}', stderr=('diagnostic line\n' * 1000))
+
+    result = paper_sync.run_paper_fetch('10.1234/test', dest, runner=failed_runner)
+    assert '\n' not in result['fetch_error']
+    assert len(result['fetch_error']) <= 300
+    assert result['retryable'] is True
 
 
 def test_run_paper_fetch_rejects_html_even_when_json_says_ok(tmp_path):
@@ -180,6 +287,79 @@ def test_acquire_pdf_uses_valid_cache_before_other_sources(tmp_path, monkeypatch
         'pdf': str(dest), 'pdf_source': 'cache', 'fetch_route': 'cache',
         'fetch_error': None, 'retryable': False,
     }
+
+
+def test_acquire_pdf_replace_failure_preserves_stale_destination(tmp_path, monkeypatch):
+    monkeypatch.setattr(paper_sync, 'WORK_DIR', tmp_path)
+    dest = tmp_path / 'doi10.1234test.pdf'
+    old = b'<html>old stale destination'
+    dest.write_bytes(old)
+    original_replace = Path.replace
+
+    def fake_wrangler(args):
+        assert dest.read_bytes() == old
+        Path(args[args.index('--file') + 1]).write_bytes(b'%PDF' + b'x' * 3000)
+
+    def failed_replace(path, target):
+        if path.suffix == '.part':
+            raise PermissionError('destination is locked')
+        return original_replace(path, target)
+
+    monkeypatch.setattr(paper_sync, '_wrangler', fake_wrangler)
+    monkeypatch.setattr(Path, 'replace', failed_replace)
+    result = paper_sync.acquire_pdf({
+        'item_id': 'doi:10.1234/test', 'pdf_key': 'pdf/test.pdf',
+        'oa_pdf_url': None, 'doi': '',
+    })
+    assert set(result) == {'pdf', 'pdf_source', 'fetch_route', 'fetch_error', 'retryable'}
+    assert result['pdf'] is None
+    assert result['retryable'] is True
+    assert dest.read_bytes() == old
+    assert not list(tmp_path.glob('*.part'))
+
+
+def test_acquire_pdf_returns_typed_result_when_work_dir_creation_fails(
+        tmp_path, monkeypatch):
+    work_dir = tmp_path / 'locked'
+    monkeypatch.setattr(paper_sync, 'WORK_DIR', work_dir)
+    original_mkdir = Path.mkdir
+
+    def failed_mkdir(path, *args, **kwargs):
+        if path == work_dir:
+            raise PermissionError('work dir is locked')
+        return original_mkdir(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, 'mkdir', failed_mkdir)
+    result = paper_sync.acquire_pdf({
+        'item_id': 'manual:locked', 'pdf_key': None, 'oa_pdf_url': None, 'doi': '',
+    })
+    assert set(result) == {'pdf', 'pdf_source', 'fetch_route', 'fetch_error', 'retryable'}
+    assert result['pdf'] is None
+    assert 'work dir is locked' in result['fetch_error']
+    assert result['retryable'] is True
+
+
+def test_acquire_pdf_cleanup_permission_error_does_not_abort(tmp_path, monkeypatch):
+    monkeypatch.setattr(paper_sync, 'WORK_DIR', tmp_path)
+    original_unlink = Path.unlink
+
+    def fake_wrangler(args):
+        Path(args[args.index('--file') + 1]).write_bytes(b'<html>' + b'x' * 3000)
+
+    def locked_part_cleanup(path, *args, **kwargs):
+        if path.suffix == '.part':
+            raise PermissionError('part is locked')
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(paper_sync, '_wrangler', fake_wrangler)
+    monkeypatch.setattr(Path, 'unlink', locked_part_cleanup)
+    result = paper_sync.acquire_pdf({
+        'item_id': 'manual:locked', 'pdf_key': 'pdf/test.pdf',
+        'oa_pdf_url': None, 'doi': '',
+    })
+    assert set(result) == {'pdf', 'pdf_source', 'fetch_route', 'fetch_error', 'retryable'}
+    assert result['pdf'] is None
+    assert 'valid PDF' in result['fetch_error']
 
 
 def test_acquire_pdf_falls_back_from_invalid_r2_to_oa(tmp_path, monkeypatch):
@@ -238,6 +418,44 @@ def test_acquire_pdf_accumulates_failures_before_paper_fetch(tmp_path, monkeypat
     assert 'paper-fetch: routes exhausted' in result['fetch_error']
     assert result['retryable'] is True
     assert not list(tmp_path.glob('*.part'))
+
+
+def test_acquire_pdf_marks_r2_and_oa_only_transient_failures_retryable(
+        tmp_path, monkeypatch):
+    monkeypatch.setattr(paper_sync, 'WORK_DIR', tmp_path)
+    monkeypatch.setattr(paper_sync, '_wrangler',
+                        lambda args: (_ for _ in ()).throw(OSError('R2 timeout')))
+    monkeypatch.setattr(urllib.request, 'urlopen',
+                        lambda *args, **kwargs: (_ for _ in ()).throw(OSError('OA timeout')))
+    result = paper_sync.acquire_pdf({
+        'item_id': 'manual:transient', 'pdf_key': 'pdf/test.pdf',
+        'oa_pdf_url': 'https://example.test/test.pdf', 'doi': '',
+    })
+    assert result['pdf'] is None
+    assert result['retryable'] is True
+    assert 'r2: R2 timeout' in result['fetch_error']
+    assert 'oa-url: OA timeout' in result['fetch_error']
+
+
+def test_acquire_pdf_preserves_prior_retryable_when_fetch_routes_exhausted(
+        tmp_path, monkeypatch):
+    monkeypatch.setattr(paper_sync, 'WORK_DIR', tmp_path)
+    monkeypatch.setattr(paper_sync, '_wrangler',
+                        lambda args: (_ for _ in ()).throw(OSError('R2 timeout')))
+
+    def route_exhausted(cmd, **kwargs):
+        return CompletedProcess(
+            cmd, 2, stdout='{"ok": false, "resolver_url": "https://resolver.test"}',
+            stderr='diagnostics')
+
+    result = paper_sync.acquire_pdf({
+        'item_id': 'doi:10.1234/test', 'pdf_key': 'pdf/test.pdf',
+        'oa_pdf_url': None, 'doi': '10.1234/test',
+    }, runner=route_exhausted)
+    assert result['pdf'] is None
+    assert result['retryable'] is True
+    assert 'r2: R2 timeout' in result['fetch_error']
+    assert 'paper-fetch: https://resolver.test' in result['fetch_error']
 
 
 def test_cmd_pending_writes_all_acquisition_result_keys(tmp_path, monkeypatch):
