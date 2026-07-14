@@ -2,6 +2,9 @@
 """paper_sync 純函數測試。跑法：python -X utf8 -m pytest tests/ -v"""
 import json
 import sys, os
+import urllib.request
+from pathlib import Path
+from subprocess import CompletedProcess
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import paper_sync
 from paper_sync import sanitize_filename, short_title, first_author_surname, note_filename, build_worklist, valid_item_id
@@ -109,3 +112,145 @@ def test_build_worklist_pdf_source_priority():
     assert build_worklist(rows(), PAPERS)[0]['pdf_source'] == 'oa'          # 有 oa_pdf_url
     wl = build_worklist(rows(item_id='doi:10.2/def', title='Paper B'), PAPERS)
     assert wl[0]['pdf_source'] == 'missing'                                  # 都沒有
+
+
+def test_is_valid_pdf_rejects_html(tmp_path):
+    p = tmp_path / 'fake.pdf'
+    p.write_bytes(b'<html>' + b'x' * 3000)
+    assert paper_sync.is_valid_pdf(p) is False
+
+
+def test_run_paper_fetch_installs_unique_valid_result(tmp_path):
+    dest = tmp_path / 'paper.pdf'
+
+    def fake_runner(cmd, **kwargs):
+        assert cmd[1:3] == ['-X', 'utf8']
+        part = Path(cmd[-1])
+        part.write_bytes(b'%PDF' + b'x' * 3000)
+        env = {'schema': 1, 'doi': '10.1234/test', 'ok': True, 'route': 'unpaywall',
+               'tried': ['unpaywall'], 'bytes': part.stat().st_size,
+               'sha256': 'fixture', 'path': str(part), 'elapsed_s': 0.1}
+        return CompletedProcess(cmd, 0, stdout=json.dumps(env), stderr='')
+
+    result = paper_sync.run_paper_fetch('10.1234/test', dest, runner=fake_runner)
+    assert result['pdf'] == str(dest)
+    assert result['fetch_route'] == 'unpaywall'
+    assert paper_sync.is_valid_pdf(dest)
+
+
+def test_run_paper_fetch_does_not_accept_stale_destination(tmp_path):
+    dest = tmp_path / 'paper.pdf'
+    dest.write_bytes(b'%PDF' + b'old' * 1000)
+
+    def failed_runner(cmd, **kwargs):
+        return CompletedProcess(cmd, 2, stdout='{"ok": false}', stderr='no route')
+
+    result = paper_sync.run_paper_fetch('10.1234/test', dest, runner=failed_runner)
+    assert result['pdf'] is None
+    assert result['fetch_error']
+
+
+def test_run_paper_fetch_rejects_html_even_when_json_says_ok(tmp_path):
+    dest = tmp_path / 'paper.pdf'
+
+    def fake_runner(cmd, **kwargs):
+        part = Path(cmd[-1])
+        part.write_bytes(b'<html>' + b'x' * 3000)
+        return CompletedProcess(cmd, 0, stdout='{"ok": true, "route": "unpaywall"}', stderr='')
+
+    result = paper_sync.run_paper_fetch('10.1234/test', dest, runner=fake_runner)
+    assert result['pdf'] is None
+
+
+def test_acquire_pdf_uses_valid_cache_before_other_sources(tmp_path, monkeypatch):
+    monkeypatch.setattr(paper_sync, 'WORK_DIR', tmp_path)
+    dest = tmp_path / 'doi10.1234test.pdf'
+    dest.write_bytes(b'%PDF' + b'x' * 3000)
+    monkeypatch.setattr(paper_sync, '_wrangler',
+                        lambda args: (_ for _ in ()).throw(AssertionError('R2 called')))
+
+    def runner(cmd, **kwargs):
+        raise AssertionError('paper-fetch called')
+
+    result = paper_sync.acquire_pdf({
+        'item_id': 'doi:10.1234/test', 'pdf_key': 'pdf/test.pdf',
+        'oa_pdf_url': 'https://example.test/test.pdf', 'doi': '10.1234/test',
+    }, runner=runner)
+    assert result == {
+        'pdf': str(dest), 'pdf_source': 'cache', 'fetch_route': 'cache',
+        'fetch_error': None, 'retryable': False,
+    }
+
+
+def test_acquire_pdf_falls_back_from_invalid_r2_to_oa(tmp_path, monkeypatch):
+    monkeypatch.setattr(paper_sync, 'WORK_DIR', tmp_path)
+    calls = []
+
+    def fake_wrangler(args):
+        calls.append('r2')
+        part = Path(args[args.index('--file') + 1])
+        assert part.name != 'doi10.1234_test.pdf'
+        part.write_bytes(b'<html>' + b'x' * 3000)
+
+    class Response:
+        def __enter__(self):
+            calls.append('oa')
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def read(self):
+            return b'%PDF' + b'x' * 3000
+
+    monkeypatch.setattr(paper_sync, '_wrangler', fake_wrangler)
+    monkeypatch.setattr(urllib.request, 'urlopen', lambda *args, **kwargs: Response())
+    result = paper_sync.acquire_pdf({
+        'item_id': 'doi:10.1234/test', 'pdf_key': 'pdf/test.pdf',
+        'oa_pdf_url': 'https://example.test/test.pdf', 'doi': '10.1234/test',
+    })
+    assert calls == ['r2', 'oa']
+    assert result['pdf_source'] == 'oa-url'
+    assert result['fetch_route'] == 'oa-url'
+    assert paper_sync.is_valid_pdf(result['pdf'])
+    assert not list(tmp_path.glob('*.part'))
+
+
+def test_acquire_pdf_accumulates_failures_before_paper_fetch(tmp_path, monkeypatch):
+    monkeypatch.setattr(paper_sync, 'WORK_DIR', tmp_path)
+    monkeypatch.setattr(paper_sync, '_wrangler',
+                        lambda args: (_ for _ in ()).throw(RuntimeError('R2 unavailable')))
+    monkeypatch.setattr(urllib.request, 'urlopen',
+                        lambda *args, **kwargs: (_ for _ in ()).throw(OSError('OA unavailable')))
+
+    def failed_runner(cmd, **kwargs):
+        return CompletedProcess(
+            cmd, 2, stdout='{"ok": false, "error": "routes exhausted"}', stderr='')
+
+    result = paper_sync.acquire_pdf({
+        'item_id': 'doi:10.1234/test', 'pdf_key': 'pdf/test.pdf',
+        'oa_pdf_url': 'https://example.test/test.pdf', 'doi': '10.1234/test',
+    }, runner=failed_runner)
+    assert result['pdf'] is None
+    assert result['pdf_source'] == 'missing'
+    assert 'r2: R2 unavailable' in result['fetch_error']
+    assert 'oa-url: OA unavailable' in result['fetch_error']
+    assert 'paper-fetch: routes exhausted' in result['fetch_error']
+    assert result['retryable'] is True
+    assert not list(tmp_path.glob('*.part'))
+
+
+def test_cmd_pending_writes_all_acquisition_result_keys(tmp_path, monkeypatch):
+    papers_json = tmp_path / 'papers.json'
+    papers_json.write_text(json.dumps(PAPERS), encoding='utf-8')
+    monkeypatch.setattr(paper_sync, 'PAPERS_JSON', papers_json)
+    monkeypatch.setattr(paper_sync, 'WORK_DIR', tmp_path)
+    monkeypatch.setattr(paper_sync, 'query_pending', lambda: rows())
+    expected = {'pdf': None, 'pdf_source': 'missing', 'fetch_route': None,
+                'fetch_error': 'fixture', 'retryable': False}
+    monkeypatch.setattr(paper_sync, 'acquire_pdf', lambda item: expected)
+
+    paper_sync.cmd_pending()
+
+    item = json.loads((tmp_path / 'worklist.json').read_text(encoding='utf-8'))[0]
+    assert {key: item[key] for key in expected} == expected

@@ -8,14 +8,16 @@
 注意：wrangler 走本機 OAuth（有 D1 寫入權）。subprocess 會拿掉 CLOUDFLARE_API_TOKEN，
 避免誤吃 .env 的 NAS 唯讀 token。
 """
-import json, os, re, subprocess, sys
+import json, os, re, subprocess, sys, uuid
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent
+PAPER_FETCH = REPO.parents[1] / '700_Scripts' / 'paper-fetch' / 'paper_fetch.py'
 PAPERS_JSON = Path(r'Z:/docker/paper-radar/papers.json')   # NAS canonical
 WORK_DIR = REPO / '_sync_tmp'                               # PDF 暫存＋worklist
 D1_NAME = 'paper-radar-db'
 R2_BUCKET = 'paper-radar-pdfs'
+MIN_PDF_BYTES = 1000
 PENDING_SQL = (
     'SELECT item_id, doi, title, star, deepread, content, pdf_key '
     'FROM actions WHERE synced=0 '
@@ -118,6 +120,51 @@ _ID_OK = re.compile(r'^[\w:./()\-]{1,64}$')
 def valid_item_id(s):
     return bool(_ID_OK.match(s or ''))
 
+def is_valid_pdf(path):
+    p = Path(path)
+    try:
+        return p.stat().st_size > MIN_PDF_BYTES and p.read_bytes()[:4] == b'%PDF'
+    except OSError:
+        return False
+
+def run_paper_fetch(doi, dest, runner=subprocess.run):
+    dest = Path(dest)
+    part = dest.with_name(f'{dest.stem}.{uuid.uuid4().hex}.part')
+    result = {'pdf': None, 'pdf_source': 'paper-fetch', 'fetch_route': None,
+              'fetch_error': None, 'retryable': False}
+    try:
+        proc = runner(
+            [sys.executable, '-X', 'utf8', str(PAPER_FETCH), '--json', doi, str(part)],
+            capture_output=True, text=True, encoding='utf-8', timeout=240,
+        )
+        lines = [line for line in proc.stdout.splitlines() if line.strip()]
+        envelope = json.loads(lines[-1]) if lines else {}
+        if proc.returncode != 0 or not envelope.get('ok'):
+            result['fetch_error'] = (
+                envelope.get('error') or envelope.get('resolver_url')
+                or proc.stderr.strip() or 'no route'
+            )
+            result['retryable'] = (
+                proc.returncode not in (1, 2)
+                or (proc.returncode == 2 and bool(envelope.get('error')))
+            )
+            return result
+        if not is_valid_pdf(part):
+            result['fetch_error'] = 'fetcher returned a non-PDF payload'
+            return result
+        dest.unlink(missing_ok=True)
+        part.replace(dest)
+        result.update(pdf=str(dest), fetch_route=envelope.get('route'))
+        return result
+    except subprocess.TimeoutExpired:
+        result.update(fetch_error='paper-fetch timeout', retryable=True)
+        return result
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        result['fetch_error'] = str(exc)
+        return result
+    finally:
+        part.unlink(missing_ok=True)
+
 def query_pending():
     out = _wrangler([
         'd1', 'execute', D1_NAME, '--remote', '--json', '--command', PENDING_SQL
@@ -133,33 +180,75 @@ def mark_synced(item_ids):
     _wrangler(['d1', 'execute', D1_NAME, '--remote', '--command',
                f'UPDATE actions SET synced=1 WHERE item_id IN ({ids})'])
 
-def fetch_pdf(item):
-    """依 pdf_source 抓 PDF 到 WORK_DIR。成功回傳路徑字串，失敗回 None。"""
+def _result(pdf=None, source='missing', route=None, error=None, retryable=False):
+    return {
+        'pdf': str(pdf) if pdf else None,
+        'pdf_source': source,
+        'fetch_route': route,
+        'fetch_error': error,
+        'retryable': retryable,
+    }
+
+def _part_for(dest):
+    return dest.with_name(f'{dest.stem}.{uuid.uuid4().hex}.part')
+
+def _promote_pdf(part, dest):
+    if not is_valid_pdf(part):
+        raise ValueError('downloaded payload is not a valid PDF')
+    dest.unlink(missing_ok=True)
+    part.replace(dest)
+
+def acquire_pdf(item, runner=subprocess.run):
     WORK_DIR.mkdir(exist_ok=True)
     dest = WORK_DIR / (sanitize_filename(item['item_id']).replace(' ', '_') + '.pdf')
-    if dest.exists() and dest.stat().st_size > 0:
-        return str(dest)
-    try:
-        if item['pdf_source'] == 'r2':
+    if is_valid_pdf(dest):
+        return _result(dest, 'cache', 'cache')
+    dest.unlink(missing_ok=True)
+    errors = []
+
+    if item.get('pdf_key'):
+        part = _part_for(dest)
+        try:
             _wrangler(['r2', 'object', 'get', f"{R2_BUCKET}/{item['pdf_key']}",
-                       '--file', str(dest), '--remote'])
-        elif item['pdf_source'] == 'oa':
-            import urllib.request, ssl
-            try:                                    # Windows 的 Python 不吃系統憑證庫，改用 certifi
+                       '--file', str(part), '--remote'])
+            _promote_pdf(part, dest)
+            return _result(dest, 'r2', 'r2')
+        except Exception as exc:
+            errors.append(f'r2: {exc}')
+        finally:
+            part.unlink(missing_ok=True)
+
+    if item.get('oa_pdf_url'):
+        import ssl
+        import urllib.request
+        part = _part_for(dest)
+        try:
+            try:
                 import certifi
                 ctx = ssl.create_default_context(cafile=certifi.where())
-            except Exception:
+            except ImportError:
                 ctx = ssl.create_default_context()
-            req = urllib.request.Request(item['oa_pdf_url'],
-                                         headers={'User-Agent': 'paper-radar-sync/1.0'})
-            with urllib.request.urlopen(req, timeout=60, context=ctx) as resp, open(dest, 'wb') as f:
-                f.write(resp.read())
-        else:
-            return None
-        return str(dest) if dest.exists() and dest.stat().st_size > 0 else None
-    except Exception as e:
-        print(f'  [warn] PDF 下載失敗 {item["item_id"]}: {e}')
-        return None
+            req = urllib.request.Request(
+                item['oa_pdf_url'], headers={'User-Agent': 'paper-radar-sync/1.0'}
+            )
+            with urllib.request.urlopen(req, timeout=60, context=ctx) as response:
+                part.write_bytes(response.read())
+            _promote_pdf(part, dest)
+            return _result(dest, 'oa-url', 'oa-url')
+        except Exception as exc:
+            errors.append(f'oa-url: {exc}')
+        finally:
+            part.unlink(missing_ok=True)
+
+    if item.get('doi'):
+        fetched = run_paper_fetch(item['doi'], dest, runner=runner)
+        if fetched['pdf']:
+            return fetched
+        errors.append(f"paper-fetch: {fetched['fetch_error'] or 'no route'}")
+        return _result(None, 'missing', None, '; '.join(errors), fetched['retryable'])
+
+    errors.append('no DOI available for fallback fetch')
+    return _result(None, 'missing', None, '; '.join(errors), False)
 
 def cmd_pending():
     rows = query_pending()
@@ -169,7 +258,7 @@ def cmd_pending():
     papers = json.loads(PAPERS_JSON.read_text(encoding='utf-8'))
     wl = build_worklist(rows, papers)
     for item in wl:
-        item['pdf'] = fetch_pdf(item)
+        item.update(acquire_pdf(item))
     out = WORK_DIR / 'worklist.json'
     out.write_text(json.dumps(wl, ensure_ascii=False, indent=2), encoding='utf-8')
     ok = [w for w in wl if w['pdf']]
