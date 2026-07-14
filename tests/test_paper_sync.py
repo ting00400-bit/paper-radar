@@ -335,6 +335,10 @@ def test_valid_pdf_key_accepts_conservative_r2_path():
     assert paper_sync.valid_pdf_key('pdf/2026/paper-123_v2.pdf') is True
 
 
+def test_valid_pdf_key_accepts_worker_generated_doi_key():
+    assert paper_sync.valid_pdf_key('pdf/doi:10_7759_cureus_109501.pdf') is True
+
+
 def test_acquire_pdf_rejects_unsafe_pdf_key_before_wrangler(tmp_path, monkeypatch):
     monkeypatch.setattr(paper_sync, 'WORK_DIR', tmp_path)
     monkeypatch.setattr(

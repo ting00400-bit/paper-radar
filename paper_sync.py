@@ -136,7 +136,7 @@ def _sql_quote(s):
 # item_id 白名單：實際格式只有 doi:*/h:*/manual:*（字元含 \w : . / ( ) -）。
 # D1 的 item_id 是網站寫入的，這裡擋掉任何長相可疑的值，避免流進 SQL 拼接。
 _ID_OK = re.compile(r'(?=.{1,64}\Z)(?:doi|h|manual):[A-Za-z0-9_:./()\-]+', re.ASCII)
-_PDF_KEY_PART = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]*', re.ASCII)
+_PDF_KEY_PART = re.compile(r'[A-Za-z0-9][A-Za-z0-9._:-]*', re.ASCII)
 _ROUTE_OK = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,63}', re.ASCII)
 _IDENTITY_SOURCES = {'cache', 'r2', 'oa-url', 'paper-fetch'}
 
