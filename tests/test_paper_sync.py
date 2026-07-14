@@ -364,12 +364,13 @@ def test_acquire_pdf_cleanup_permission_error_does_not_abort(tmp_path, monkeypat
 
 def test_acquire_pdf_falls_back_from_invalid_r2_to_oa(tmp_path, monkeypatch):
     monkeypatch.setattr(paper_sync, 'WORK_DIR', tmp_path)
+    dest = tmp_path / 'doi10.1234test.pdf'
     calls = []
 
     def fake_wrangler(args):
         calls.append('r2')
         part = Path(args[args.index('--file') + 1])
-        assert part.name != 'doi10.1234_test.pdf'
+        assert part != dest
         part.write_bytes(b'<html>' + b'x' * 3000)
 
     class Response:
