@@ -243,6 +243,78 @@ def _short_error(value, default='no route'):
     text = ' '.join(str(value or '').split()) or default
     return text[:MAX_ERROR_CHARS]
 
+_UNSET = object()
+_SYNC_STATUSES = {'pending', 'synced', 'blocked', 'failed'}
+_PDF_STATUSES = {
+    'missing', 'available', 'uploaded', 'verified',
+    'identity_mismatch', 'fetch_failed',
+}
+_PDF_SOURCES = {'cache', 'r2', 'oa-url', 'paper-fetch', 'manual_upload', 'missing'}
+_SYNC_URL_RE = re.compile(r'https?://\S+', re.IGNORECASE)
+_SYNC_PATH_RE = re.compile(
+    r'(?:\b[A-Z]:[\\/]|\\\\)(?:[^;\r\n]*?\.(?:pdf|json|part|tmp|log|txt|md)\b|[^;\s]+)',
+    re.IGNORECASE)
+
+def public_sync_error(value):
+    """把內部錯誤縮成可放進 D1 / dashboard 的安全摘要。"""
+    text = _short_error(value, '同步狀態未知')
+    lower = text.lower()
+    if lower.startswith('filesystem:'):
+        return '本機暫存區無法使用'
+    if 'wrangler ' in lower or 'stdout:' in lower or 'stderr:' in lower:
+        return '雲端全文讀取失敗'
+    if text == 'source_identity_mismatch':
+        return '全文身分核對失敗'
+    text = _SYNC_URL_RE.sub('[URL]', text)
+    return _SYNC_PATH_RE.sub('[local path]', text)
+
+def update_sync_status(item_id, *, sync_status=_UNSET, pdf_status=_UNSET,
+                       pdf_source=_UNSET, sync_error=_UNSET):
+    """更新 D1 的縮小版同步狀態；只接受固定欄位和值。"""
+    if not valid_item_id(item_id):
+        raise ValueError(f'可疑 item_id，拒絕執行: {item_id!r}')
+    if sync_status is not _UNSET and sync_status not in _SYNC_STATUSES:
+        raise ValueError(f'invalid sync_status: {sync_status!r}')
+    if pdf_status is not _UNSET and pdf_status not in _PDF_STATUSES:
+        raise ValueError(f'invalid pdf_status: {pdf_status!r}')
+    if pdf_source is not _UNSET and pdf_source not in _PDF_SOURCES:
+        raise ValueError(f'invalid pdf_source: {pdf_source!r}')
+
+    values = {
+        'sync_status': sync_status,
+        'pdf_status': pdf_status,
+        'pdf_source': pdf_source,
+        'sync_error': sync_error,
+    }
+    assignments = []
+    for field, value in values.items():
+        if value is _UNSET:
+            continue
+        if field == 'sync_error' and value is not None:
+            value = public_sync_error(value)
+        encoded = 'NULL' if value is None else _sql_quote(value)
+        assignments.append(f'{field}={encoded}')
+    assignments.append("sync_updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')")
+    sql = f"UPDATE actions SET {', '.join(assignments)} WHERE item_id={_sql_quote(item_id)}"
+    _wrangler(['d1', 'execute', D1_NAME, '--remote', '--command', sql])
+
+def acquisition_sync_state(result, rejection=None):
+    """把 acquire_pdf 的 typed result 映射成 dashboard current state。"""
+    source = result.get('pdf_source') or 'missing'
+    error = result.get('fetch_error')
+    if result.get('pdf'):
+        return 'pending', 'available', source, None
+    if rejection:
+        sources = rejection.get('rejected_sources') or []
+        source = sources[-1] if sources else source
+        return ('blocked', 'identity_mismatch', source,
+                public_sync_error(rejection.get('reason') or error))
+    if error == 'source_identity_mismatch':
+        return 'blocked', 'identity_mismatch', source, public_sync_error(error)
+    if result.get('retryable'):
+        return 'pending', 'fetch_failed', source, '全文取得暫時失敗，請稍後重試'
+    return 'pending', 'missing', source, '找不到可用全文來源'
+
 class _HttpStatusError(RuntimeError):
     def __init__(self, status):
         self.status = status
@@ -344,7 +416,10 @@ def mark_synced(item_ids):
         raise ValueError(f'可疑 item_id，拒絕執行: {bad}')
     ids = ','.join(_sql_quote(i) for i in item_ids)
     _wrangler(['d1', 'execute', D1_NAME, '--remote', '--command',
-               f'UPDATE actions SET synced=1 WHERE item_id IN ({ids})'])
+               "UPDATE actions SET synced=1, sync_status='synced', "
+               "pdf_status='verified', sync_error=NULL, "
+               "sync_updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') "
+               f'WHERE item_id IN ({ids})'])
 
 def _result(pdf=None, source='missing', route=None, error=None, retryable=False):
     return {
@@ -548,7 +623,14 @@ def cmd_pending():
     papers = json.loads(PAPERS_JSON.read_text(encoding='utf-8'))
     wl = build_worklist(rows, papers)
     for item in wl:
-        item.update(acquire_pdf(item))
+        result = acquire_pdf(item)
+        item.update(result)
+        rejection = load_identity_rejection(item['item_id'])
+        sync_status, pdf_status, pdf_source, sync_error = acquisition_sync_state(
+            result, rejection)
+        update_sync_status(
+            item['item_id'], sync_status=sync_status, pdf_status=pdf_status,
+            pdf_source=pdf_source, sync_error=sync_error)
     out = WORK_DIR / 'worklist.json'
     out.write_text(json.dumps(wl, ensure_ascii=False, indent=2), encoding='utf-8')
     ok = [w for w in wl if w['pdf']]
@@ -578,14 +660,23 @@ def main():
         state = record_identity_rejection(
             sys.argv[2], source=sys.argv[3], route=route,
             reason=' '.join(sys.argv[5:]))
+        update_sync_status(
+            sys.argv[2], sync_status='blocked', pdf_status='identity_mismatch',
+            pdf_source=sys.argv[3], sync_error=state['reason'])
         print(json.dumps(state, ensure_ascii=False))
     else:
         if len(sys.argv) != 3:
             print(f'用法: paper_sync.py {command} <item_id>'); sys.exit(1)
         if command == 'accept':
             accept_identity(sys.argv[2])
+            update_sync_status(
+                sys.argv[2], sync_status='pending', pdf_status='verified',
+                sync_error=None)
         else:
             reset_identity_rejection(sys.argv[2])
+            update_sync_status(
+                sys.argv[2], sync_status='pending', pdf_status='missing',
+                sync_error=None)
         print(f'local marker cleared: {sys.argv[2]}')
 
 if __name__ == '__main__':

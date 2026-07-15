@@ -12,7 +12,12 @@ CREATE TABLE IF NOT EXISTS actions (
   content   INTEGER,        -- 📚 內容整理 → /paper-digest
   pdf_key   TEXT,           -- R2 內全文 PDF key（📎 上傳）
   synced    INTEGER DEFAULT 0,  -- /paper-sync 處理後設 1
-  updated   TEXT
+  updated   TEXT,
+  sync_status TEXT,         -- pending / synced / blocked / failed
+  pdf_status TEXT,          -- missing / available / uploaded / verified / identity_mismatch / fetch_failed
+  pdf_source TEXT,          -- cache / r2 / oa-url / paper-fetch / manual_upload
+  sync_error TEXT,          -- 給狀態頁顯示的短錯誤，不放 stack trace
+  sync_updated_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_synced ON actions(synced);
 

@@ -4,6 +4,7 @@
 //                              radar 論文帶 ?item_id；外部論文不帶 → 自動產 manual:<ts>
 //   GET  /api/pdf?key=      → 從 R2 讀回已上傳的 PDF（key 即 D1 actions.pdf_key）
 //   GET  /api/state         → 回傳所有未同步動作（給 /paper-sync 拉）
+//   GET  /api/sync-status   → 回傳整理佇列的同步/PDF 狀態與 papers.json 分數
 //   其餘                     → 靜態資源
 // 整站在 CF Access 後面，呼叫者已是本人。綁定：D1=DB, R2=PDFS。
 
@@ -24,11 +25,29 @@ export default {
         if (!id || !col) return json({ error: "bad params" }, 400);
         const val = d.key === "vote" ? (d.val ? String(d.val).slice(0, 8) : null) : (d.val ? 1 : 0);
         const ts = new Date().toISOString();
-        await env.DB.prepare(
-          `INSERT INTO actions (item_id, doi, title, ${col}, updated, synced)
-           VALUES (?1, ?2, ?3, ?4, ?5, 0)
-           ON CONFLICT(item_id) DO UPDATE SET ${col}=?4, updated=?5, synced=0`
-        ).bind(id, String(d.doi || "").slice(0, 120), String(d.title || "").slice(0, 300), val, ts).run();
+        const workKey = ["star", "deepread", "content"].includes(d.key);
+        const pending = workKey && val;
+        const otherWork = ["star", "deepread", "content"].filter(key => key !== col);
+        const sql = pending
+          ? `INSERT INTO actions (item_id, doi, title, ${col}, updated, synced, sync_status, sync_updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6, ?5)
+             ON CONFLICT(item_id) DO UPDATE SET ${col}=?4, updated=?5, synced=0,
+               sync_status=CASE WHEN pdf_status='identity_mismatch' THEN 'blocked' ELSE ?6 END,
+               sync_updated_at=?5`
+          : workKey
+          ? `INSERT INTO actions (item_id, doi, title, ${col}, updated, synced, sync_status, sync_updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, 0, NULL, ?5)
+             ON CONFLICT(item_id) DO UPDATE SET ${col}=?4, updated=?5, synced=0,
+               sync_status=CASE WHEN ${otherWork[0]}=1 OR ${otherWork[1]}=1
+                 THEN CASE WHEN sync_status IN ('blocked','failed') THEN sync_status ELSE 'pending' END
+                 ELSE NULL END, sync_updated_at=?5`
+          : `INSERT INTO actions (item_id, doi, title, ${col}, updated)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(item_id) DO UPDATE SET ${col}=?4, updated=?5`;
+        const statement = env.DB.prepare(sql).bind(
+          id, String(d.doi || "").slice(0, 120), String(d.title || "").slice(0, 300), val, ts,
+          ...(pending ? ["pending"] : []));
+        await statement.run();
         return json({ ok: true });
       } catch (e) {
         return json({ error: "fail", detail: String(e) }, 500);
@@ -59,10 +78,14 @@ export default {
         await env.PDFS.put(key, request.body, { httpMetadata: { contentType: "application/pdf" } });
         const ts = new Date().toISOString();
         await env.DB.prepare(
-          `INSERT INTO actions (item_id, doi, title, pdf_key, deepread, content, updated, synced)
-           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0)
-           ON CONFLICT(item_id) DO UPDATE SET pdf_key=?4, deepread=COALESCE(?5,deepread), content=COALESCE(?6,content), updated=?7, synced=0`
-        ).bind(id, doi, title, key, deepread, content, ts).run();
+          `INSERT INTO actions (item_id, doi, title, pdf_key, deepread, content, updated, synced,
+             sync_status, pdf_status, pdf_source, sync_error, sync_updated_at)
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, ?8, ?9, ?10, NULL, ?7)
+           ON CONFLICT(item_id) DO UPDATE SET pdf_key=?4, deepread=COALESCE(?5,deepread),
+             content=COALESCE(?6,content), updated=?7, synced=0, sync_status=?8,
+             pdf_status=?9, pdf_source=?10, sync_error=NULL, sync_updated_at=?7`
+        ).bind(id, doi, title, key, deepread, content, ts,
+               "pending", "uploaded", "manual_upload").run();
         // usage 計數
         await env.DB.prepare(
           `INSERT INTO usage (month, uploads, bytes) VALUES (?1, 1, ?2)
@@ -96,10 +119,72 @@ export default {
       return json({ actions: results });
     }
 
+    if (url.pathname === "/api/sync-status" && request.method === "GET") {
+      try {
+        const { results } = await env.DB.prepare(
+          `SELECT item_id, doi, title, content, deepread, star, synced,
+                  sync_status, pdf_status, pdf_source, sync_error, sync_updated_at
+             FROM actions
+            WHERE content=1 OR deepread=1 OR star=1 OR sync_status IS NOT NULL
+            ORDER BY COALESCE(sync_updated_at, updated) DESC`
+        ).all();
+        const paperResponse = await env.ASSETS.fetch(new URL("/papers.json", url));
+        if (!paperResponse.ok) return json({ error: "sync status unavailable" }, 502);
+        const data = await paperResponse.json();
+        const byId = new Map();
+        const byDoi = new Map();
+        for (const paper of (data.papers || [])) {
+          if (paper.item_id) byId.set(String(paper.item_id), paper);
+          if (paper.doi) byDoi.set(String(paper.doi).toLowerCase(), paper);
+        }
+        const items = (results || []).map(action => {
+          const paper = byId.get(String(action.item_id))
+            || byDoi.get(String(action.doi || "").toLowerCase()) || {};
+          const reasons = Array.isArray(paper.why)
+            ? paper.why.slice(0, 3).map(reason => String(reason).slice(0, 120)) : [];
+          return {
+            item_id: String(action.item_id || "").slice(0, 64),
+            doi: String(paper.doi || action.doi || "").slice(0, 120),
+            title: String(paper.title || action.title || "").slice(0, 300),
+            content: Boolean(action.content),
+            deepread: Boolean(action.deepread),
+            star: Boolean(action.star),
+            synced: Boolean(action.synced),
+            sync_status: action.sync_status || null,
+            note_status: null,
+            note_verified: null,
+            note_path: null,
+            pdf_status: action.pdf_status || null,
+            pdf_source: action.pdf_source || null,
+            sync_error: publicSyncError(action.sync_error),
+            sync_updated_at: action.sync_updated_at || null,
+            score: Number.isFinite(paper.score) ? paper.score : null,
+            kw_score: Number.isFinite(paper.kw_score) ? paper.kw_score : null,
+            rank: Number.isFinite(paper.rank) ? paper.rank : null,
+            explore: Boolean(paper.explore),
+            why: reasons,
+          };
+        });
+        return json({ items });
+      } catch (_) {
+        return json({ error: "sync status unavailable" }, 500);
+      }
+    }
+
     return env.ASSETS.fetch(request);
   },
 };
 
 function json(obj, status = 200) {
   return new Response(JSON.stringify(obj), { status, headers: { "Content-Type": "application/json" } });
+}
+
+function publicSyncError(value) {
+  if (!value) return null;
+  let text = String(value).replace(/\s+/g, " ").trim();
+  if (/wrangler\s|stdout:|stderr:/i.test(text)) return "雲端全文讀取失敗";
+  text = text.replace(/https?:\/\/\S+/gi, "[URL]");
+  text = text.replace(/\b[A-Za-z]:[\\/](?:[^;\r\n]*?\.(?:pdf|json|part|tmp|log|txt|md)\b|[^;\s]+)/gi, "[local path]");
+  text = text.replace(/\\\\(?:[^;\r\n]*?\.(?:pdf|json|part|tmp|log|txt|md)\b|[^;\s]+)/gi, "[local path]");
+  return text.slice(0, 300);
 }

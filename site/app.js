@@ -37,6 +37,10 @@ if(filt.tab === undefined){ filt.tab = filt.showSeen ? 'seen' : 'unseen'; delete
 const seenAtLoad = new Set();        // 開頁當下已 seen 的 item_id → 只有「載入前就已看」的才隱藏；本 session 新點的留著（可再點第二顆鈕）
 let headCollapsed = load('pr_headcollapse_v1', window.innerWidth < 600);
 const hideTimers = new Map();        // item_id → 動作後延遲淡出的計時器（render 時全部重置）
+let syncItems = [];
+let syncLoadState = 'idle';
+let syncLoadError = '';
+let syncFilter = 'all';
 
 function load(k,d){ try{return JSON.parse(localStorage.getItem(k))??d}catch{return d} }
 
@@ -188,6 +192,7 @@ async function init(){
   bindHeadToggle();
   applyHeadCollapse();
   render();
+  if(filt.tab === 'sync') loadSyncItems();
 }
 
 function bindHeadToggle(){
@@ -284,14 +289,19 @@ function syncBadgeUI(){
 
 function bindTabs(){
   document.querySelectorAll('#tabs .tab').forEach(t => {
-    t.onclick = () => { filt.tab = t.dataset.tab; save(LS_FILT, filt); syncSortOptions(); render(); };
+    t.onclick = () => {
+      filt.tab = t.dataset.tab; save(LS_FILT, filt); syncSortOptions(); render();
+      if(filt.tab === 'sync' && syncLoadState === 'idle') loadSyncItems();
+    };
   });
 }
 // 筆數以「主題+badge+搜尋過濾後」為分母（與 footer 同基準），兩 tab 各自計數
 function syncTabUI(unseenN, seenN){
   document.querySelectorAll('#tabs .tab').forEach(t => {
     t.classList.toggle('on', t.dataset.tab === filt.tab);
-    t.textContent = t.dataset.tab === 'seen' ? `已看 (${seenN})` : `未看 (${unseenN})`;
+    t.textContent = t.dataset.tab === 'seen' ? `已看 (${seenN})`
+      : t.dataset.tab === 'sync' ? `同步狀態${syncLoadState === 'ready' ? ` (${syncItems.length})` : ''}`
+      : `未看 (${unseenN})`;
   });
 }
 
@@ -348,6 +358,10 @@ function render(){
   let seenN = 0;
   for(const p of base) if((actions[p.item_id]||{}).seen) seenN++;
   syncTabUI(base.length - seenN, seenN);
+  if(filt.tab === 'sync'){
+    renderSyncDashboard();
+    return;
+  }
   const ps = base.filter(passSeen);
   const upd = p => (actions[p.item_id]||{}).updated || '';
   ps.sort(filt.sort==='date'
@@ -361,6 +375,101 @@ function render(){
 }
 
 const dateValue = p => p.pub_date_sort || p.first_seen || '';
+
+const SYNC_LABELS = {
+  sync: {pending:'待同步', synced:'已同步', blocked:'阻塞', failed:'失敗'},
+  pdf: {
+    missing:'缺全文', available:'全文待核對', uploaded:'手動上傳，待核對',
+    verified:'全文已核對', identity_mismatch:'全文抓錯', fetch_failed:'全文取得失敗',
+  },
+};
+function syncStatusLabel(kind, value){
+  return SYNC_LABELS[kind]?.[value] || (value ? String(value) : '未記錄');
+}
+function passSyncFilter(item, filter){
+  switch(filter){
+    case 'pending': return item.sync_status === 'pending' || item.sync_status === 'blocked' || item.sync_status === 'failed';
+    case 'missing': return item.pdf_status === 'missing' || item.pdf_status === 'fetch_failed';
+    case 'mismatch': return item.pdf_status === 'identity_mismatch';
+    case 'synced': return item.sync_status === 'synced' || item.synced === true;
+    case 'explore': return item.explore === true;
+    default: return true;
+  }
+}
+function syncScoreText(item){
+  const parts = [];
+  if(Number.isFinite(item.score)) parts.push(`Score ${item.score}`);
+  if(Number.isFinite(item.kw_score)) parts.push(`Keyword ${item.kw_score}`);
+  if(Number.isFinite(item.rank)) parts.push(`Rank ${item.rank}`);
+  if(item.explore) parts.push('探索');
+  return parts.join(' · ');
+}
+function syncApiError(status){
+  return `同步狀態暫時無法載入${status ? `（HTTP ${status}）` : ''}，請稍後重試。`;
+}
+function syncCardHtml(item){
+  const work = [];
+  if(item.content) work.push('內容');
+  if(item.deepread) work.push('品質');
+  if(item.star) work.push('筆記');
+  const scores = syncScoreText(item);
+  const reasons = Array.isArray(item.why) ? item.why.slice(0,3).map(esc).join(' · ') : '';
+  return `<article class="sync-card">
+    <div class="sync-title">${esc(item.title || item.item_id || '未命名論文')}</div>
+    <div class="sync-meta">${esc(item.doi || item.item_id || '')}${item.sync_updated_at ? ` · ${esc(item.sync_updated_at)}` : ''}</div>
+    <div class="sync-badges">
+      ${work.map(label=>`<span class="status-badge work">${label}</span>`).join('')}
+      <span class="status-badge sync-${esc(item.sync_status || 'none')}">${esc(syncStatusLabel('sync', item.sync_status))}</span>
+      <span class="status-badge pdf-${esc(item.pdf_status || 'none')}">${esc(syncStatusLabel('pdf', item.pdf_status))}</span>
+      ${item.pdf_source ? `<span class="status-badge source">${esc(item.pdf_source)}</span>` : ''}
+    </div>
+    ${scores ? `<div class="sync-score">${esc(scores)}</div>` : ''}
+    ${reasons ? `<div class="sync-why">原因：${reasons}</div>` : ''}
+    ${item.sync_error ? `<div class="sync-error">${esc(item.sync_error)}</div>` : ''}
+  </article>`;
+}
+async function loadSyncItems(force=false){
+  if(syncLoadState === 'loading' || (syncLoadState === 'ready' && !force)) return;
+  syncLoadState = 'loading'; syncLoadError = ''; render();
+  try{
+    const response = await fetch('/api/sync-status?_=' + Date.now());
+    if(!response.ok) throw {status: response.status};
+    const payload = await response.json();
+    if(!Array.isArray(payload.items)) throw {};
+    syncItems = payload.items;
+    syncLoadState = 'ready';
+  }catch(error){
+    syncLoadState = 'error';
+    syncLoadError = syncApiError(error?.status);
+  }
+  render();
+}
+function renderSyncDashboard(){
+  const list = document.getElementById('list');
+  const filters = [
+    ['all','全部'], ['pending','待同步'], ['missing','缺全文'],
+    ['mismatch','全文抓錯'], ['synced','已同步'], ['explore','探索文章'],
+  ];
+  const controls = `<section class="sync-toolbar" aria-label="同步狀態篩選">
+    ${filters.map(([key,label])=>`<button class="chip" data-sync-filter="${key}" data-on="${syncFilter===key?'1':'0'}">${label}</button>`).join('')}
+  </section>`;
+  if(syncLoadState === 'loading' || syncLoadState === 'idle'){
+    list.innerHTML = controls + '<p class="sync-empty">同步狀態載入中…</p>';
+  } else if(syncLoadState === 'error'){
+    list.innerHTML = controls + `<div class="sync-empty sync-error">${esc(syncLoadError)} <button id="syncRetry">重試</button></div>`;
+  } else {
+    const items = syncItems.filter(item => passSyncFilter(item, syncFilter));
+    list.innerHTML = controls + (items.length
+      ? items.map(syncCardHtml).join('')
+      : '<p class="sync-empty">目前沒有符合條件的同步項目。</p>');
+    document.getElementById('count').textContent = `同步狀態 ${items.length} / ${syncItems.length} 篇`;
+  }
+  list.querySelectorAll('[data-sync-filter]').forEach(button => {
+    button.onclick = () => { syncFilter = button.dataset.syncFilter; renderSyncDashboard(); };
+  });
+  const retry = document.getElementById('syncRetry');
+  if(retry) retry.onclick = () => loadSyncItems(true);
+}
 
 function card(p){
   const a = actions[p.item_id] || {};

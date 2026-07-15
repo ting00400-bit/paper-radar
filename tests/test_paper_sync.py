@@ -976,11 +976,10 @@ def test_local_identity_cli_rejects_non_allowlisted_arguments(
         paper_sync.main()
 
 
-def test_local_reject_cli_records_marker_without_wrangler(identity_dirs, monkeypatch):
+def test_reject_cli_records_marker_and_blocked_status(identity_dirs, monkeypatch):
     item_id = 'manual:cli-local'
-    monkeypatch.setattr(
-        paper_sync, '_wrangler',
-        lambda args: (_ for _ in ()).throw(AssertionError('wrangler must not run')))
+    calls = []
+    monkeypatch.setattr(paper_sync, '_wrangler', lambda args: calls.append(args) or '')
     monkeypatch.setattr(sys, 'argv', [
         'paper_sync.py', 'reject', item_id, 'r2', 'r2', 'DOI mismatch'])
 
@@ -989,6 +988,112 @@ def test_local_reject_cli_records_marker_without_wrangler(identity_dirs, monkeyp
     state = paper_sync.load_identity_rejection(item_id)
     assert state['attempts'] == 1
     assert state['reason'] == 'DOI mismatch'
+    sql = calls[0][-1]
+    assert "sync_status='blocked'" in sql
+    assert "pdf_status='identity_mismatch'" in sql
+    assert "pdf_source='r2'" in sql
+    assert "sync_error='DOI mismatch'" in sql
+
+
+def test_update_sync_status_validates_item_id_and_escapes_error(monkeypatch):
+    calls = []
+    monkeypatch.setattr(paper_sync, '_wrangler', lambda args: calls.append(args) or '')
+
+    paper_sync.update_sync_status(
+        'doi:10.1234/example', sync_status='pending', pdf_status='missing',
+        pdf_source='paper-fetch', sync_error="author's PDF unavailable")
+
+    sql = calls[0][-1]
+    assert "sync_status='pending'" in sql
+    assert "pdf_status='missing'" in sql
+    assert "pdf_source='paper-fetch'" in sql
+    assert "author''s PDF unavailable" in sql
+    assert 'sync_updated_at=' in sql
+    with pytest.raises(ValueError):
+        paper_sync.update_sync_status("x'; DROP TABLE actions;--", sync_status='pending')
+
+
+@pytest.mark.parametrize(('result', 'expected'), [
+    ({'pdf': 'paper.pdf', 'pdf_source': 'r2', 'fetch_error': None, 'retryable': False},
+     ('pending', 'available', 'r2', None)),
+    ({'pdf': None, 'pdf_source': 'missing', 'fetch_error': 'source_identity_mismatch', 'retryable': False},
+     ('blocked', 'identity_mismatch', 'missing', '全文身分核對失敗')),
+    ({'pdf': None, 'pdf_source': 'missing', 'fetch_error': 'HTTP 503', 'retryable': True},
+     ('pending', 'fetch_failed', 'missing', '全文取得暫時失敗，請稍後重試')),
+    ({'pdf': None, 'pdf_source': 'missing', 'fetch_error': 'no route', 'retryable': False},
+     ('pending', 'missing', 'missing', '找不到可用全文來源')),
+])
+def test_acquisition_sync_state(result, expected):
+    assert paper_sync.acquisition_sync_state(result) == expected
+
+
+def test_acquisition_sync_state_preserves_identity_marker_source_and_reason():
+    result = {
+        'pdf': None, 'pdf_source': 'missing', 'fetch_error': 'routes exhausted',
+        'retryable': False,
+    }
+    rejection = {
+        'rejected_sources': ['r2'], 'reason': 'R2 PDF belongs to another DOI',
+    }
+
+    assert paper_sync.acquisition_sync_state(result, rejection) == (
+        'blocked', 'identity_mismatch', 'r2', 'R2 PDF belongs to another DOI')
+
+
+def test_public_sync_error_removes_paths_urls_and_wrangler_details():
+    assert paper_sync.public_sync_error(
+        r'filesystem: C:\Users\ting\secret.pdf') == '本機暫存區無法使用'
+    assert paper_sync.public_sync_error(
+        'r2: wrangler command failed; stderr: token detail') == '雲端全文讀取失敗'
+    safe = paper_sync.public_sync_error(
+        'DOI mismatch at C:\\Users\\Ting\\My Project\\wrong.pdf https://resolver.test/item')
+    assert 'C:\\' not in safe
+    assert 'Project\\wrong.pdf' not in safe
+    assert 'https://' not in safe
+
+
+def test_accept_cli_marks_pdf_verified_and_clears_error(identity_dirs, monkeypatch):
+    item_id = 'manual:accept-status'
+    paper_sync.record_identity_rejection(
+        item_id, source='r2', route='r2', reason='wrong DOI')
+    calls = []
+    monkeypatch.setattr(paper_sync, '_wrangler', lambda args: calls.append(args) or '')
+    monkeypatch.setattr(sys, 'argv', ['paper_sync.py', 'accept', item_id])
+
+    paper_sync.main()
+
+    sql = calls[0][-1]
+    assert "sync_status='pending'" in sql
+    assert "pdf_status='verified'" in sql
+    assert 'sync_error=NULL' in sql
+
+
+def test_accept_cli_does_not_update_d1_when_marker_clear_fails(
+        identity_dirs, monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        paper_sync, 'accept_identity',
+        lambda _item_id: (_ for _ in ()).throw(PermissionError('locked')))
+    monkeypatch.setattr(paper_sync, '_wrangler', lambda args: calls.append(args) or '')
+    monkeypatch.setattr(sys, 'argv', ['paper_sync.py', 'accept', 'manual:locked'])
+
+    with pytest.raises(PermissionError):
+        paper_sync.main()
+
+    assert calls == []
+
+
+def test_mark_synced_sets_dashboard_status(monkeypatch):
+    calls = []
+    monkeypatch.setattr(paper_sync, '_wrangler', lambda args: calls.append(args) or '')
+
+    paper_sync.mark_synced(['doi:10.1234/example'])
+
+    sql = calls[0][-1]
+    assert 'synced=1' in sql
+    assert "sync_status='synced'" in sql
+    assert "pdf_status='verified'" in sql
+    assert 'sync_error=NULL' in sql
 
 
 def test_cmd_pending_writes_all_acquisition_result_keys(tmp_path, monkeypatch):
@@ -1000,8 +1105,43 @@ def test_cmd_pending_writes_all_acquisition_result_keys(tmp_path, monkeypatch):
     expected = {'pdf': None, 'pdf_source': 'missing', 'fetch_route': None,
                 'fetch_error': 'fixture', 'retryable': False}
     monkeypatch.setattr(paper_sync, 'acquire_pdf', lambda item: expected)
+    statuses = []
+    monkeypatch.setattr(
+        paper_sync, 'update_sync_status',
+        lambda item_id, **fields: statuses.append((item_id, fields)))
 
     paper_sync.cmd_pending()
 
     item = json.loads((tmp_path / 'worklist.json').read_text(encoding='utf-8'))[0]
     assert {key: item[key] for key in expected} == expected
+    assert statuses == [(rows()[0]['item_id'], {
+        'sync_status': 'pending', 'pdf_status': 'missing',
+        'pdf_source': 'missing', 'sync_error': '找不到可用全文來源',
+    })]
+
+
+def test_cmd_pending_preserves_rejection_status_when_other_routes_fail(
+        tmp_path, monkeypatch):
+    papers_json = tmp_path / 'papers.json'
+    papers_json.write_text(json.dumps(PAPERS), encoding='utf-8')
+    monkeypatch.setattr(paper_sync, 'PAPERS_JSON', papers_json)
+    monkeypatch.setattr(paper_sync, 'WORK_DIR', tmp_path)
+    monkeypatch.setattr(paper_sync, 'query_pending', lambda: rows())
+    monkeypatch.setattr(paper_sync, 'acquire_pdf', lambda _item: {
+        'pdf': None, 'pdf_source': 'missing', 'fetch_route': None,
+        'fetch_error': 'routes exhausted', 'retryable': False,
+    })
+    monkeypatch.setattr(paper_sync, 'load_identity_rejection', lambda _item_id: {
+        'rejected_sources': ['r2'], 'reason': 'DOI mismatch', 'attempts': 1,
+    })
+    statuses = []
+    monkeypatch.setattr(
+        paper_sync, 'update_sync_status',
+        lambda item_id, **fields: statuses.append((item_id, fields)))
+
+    paper_sync.cmd_pending()
+
+    assert statuses[0][1] == {
+        'sync_status': 'blocked', 'pdf_status': 'identity_mismatch',
+        'pdf_source': 'r2', 'sync_error': 'DOI mismatch',
+    }

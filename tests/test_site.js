@@ -57,6 +57,11 @@ function loadApp({storage = {}, sharedValues, fetchImpl, locks}) {
       pending: () => pendingOps,
       currentActions: () => actions,
       dateValue,
+      syncStatusLabel,
+      passSyncFilter,
+      syncScoreText,
+      syncApiError,
+      syncCardHtml,
     };
   `;
   vm.createContext(context);
@@ -261,4 +266,55 @@ test('dateValue prefers normalized publication date and falls back to first seen
 test('header contains the unsynced operation indicator', () => {
   const html = fs.readFileSync(path.join(root, 'site', 'index.html'), 'utf8');
   assert.match(html, /id="syncStatus"/);
+});
+
+test('sync dashboard labels expose actionable Traditional Chinese states', () => {
+  const {api} = loadApp({fetchImpl: async () => ({ok: true})});
+
+  assert.equal(api.syncStatusLabel('sync', 'blocked'), '阻塞');
+  assert.equal(api.syncStatusLabel('pdf', 'missing'), '缺全文');
+  assert.equal(api.syncStatusLabel('pdf', 'identity_mismatch'), '全文抓錯');
+  assert.equal(api.syncStatusLabel('pdf', 'uploaded'), '手動上傳，待核對');
+});
+
+test('sync dashboard filters pending, missing, mismatch, synced, and explore', () => {
+  const {api} = loadApp({fetchImpl: async () => ({ok: true})});
+  const pending = {sync_status: 'pending', pdf_status: 'missing', explore: false};
+  const mismatch = {sync_status: 'blocked', pdf_status: 'identity_mismatch', explore: false};
+  const synced = {sync_status: 'synced', pdf_status: 'verified', explore: true};
+
+  assert.equal(api.passSyncFilter(pending, 'pending'), true);
+  assert.equal(api.passSyncFilter(pending, 'missing'), true);
+  assert.equal(api.passSyncFilter(mismatch, 'mismatch'), true);
+  assert.equal(api.passSyncFilter(synced, 'synced'), true);
+  assert.equal(api.passSyncFilter(synced, 'explore'), true);
+  assert.equal(api.passSyncFilter(mismatch, 'synced'), false);
+});
+
+test('sync dashboard score and card automatically include optional PRPM fields', () => {
+  const {api} = loadApp({fetchImpl: async () => ({ok: true})});
+  const item = {
+    item_id: 'doi:10.1/example', title: '<Example>', content: true, deepread: true, star: true,
+    sync_status: 'blocked', pdf_status: 'identity_mismatch', pdf_source: 'r2',
+    sync_error: '<wrong PDF>', sync_updated_at: '2026-07-15T10:00:00Z',
+    score: 8, kw_score: 6, rank: 3, explore: true, why: ['implant', 'recent'],
+  };
+
+  assert.equal(api.syncScoreText(item), 'Score 8 · Keyword 6 · Rank 3 · 探索');
+  const html = api.syncCardHtml(item);
+  assert.match(html, /&lt;Example&gt;/);
+  assert.match(html, /內容/);
+  assert.match(html, /品質/);
+  assert.match(html, /筆記/);
+  assert.match(html, /全文抓錯/);
+  assert.match(html, /implant/);
+  assert.doesNotMatch(html, /<wrong PDF>/);
+});
+
+test('sync API failures have a readable dashboard message and tab entry', () => {
+  const {api} = loadApp({fetchImpl: async () => ({ok: true})});
+  const html = fs.readFileSync(path.join(root, 'site', 'index.html'), 'utf8');
+
+  assert.equal(api.syncApiError(503), '同步狀態暫時無法載入（HTTP 503），請稍後重試。');
+  assert.match(html, /data-tab="sync"[^>]*>同步狀態</);
 });
