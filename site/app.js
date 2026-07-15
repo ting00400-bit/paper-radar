@@ -193,6 +193,7 @@ async function init(){
   applyHeadCollapse();
   render();
   if(filt.tab === 'sync') loadSyncItems();
+  loadProfileSummary();
 }
 
 function bindHeadToggle(){
@@ -368,13 +369,64 @@ function render(){
     ? (a,b)=> dateValue(b).localeCompare(dateValue(a))
     : filt.sort==='seenat'
     ? (a,b)=> upd(b).localeCompare(upd(a)) || b.score - a.score
-    : (a,b)=> b.score - a.score);
+    : paperOrder);
   list.innerHTML = '';
   for(const p of ps) list.appendChild(card(p));
   document.getElementById('count').textContent = `顯示 ${ps.length} 篇`;
 }
 
 const dateValue = p => p.pub_date_sort || p.first_seen || '';
+const paperOrder = (a,b) => {
+  const ar = Number.isFinite(a.rank), br = Number.isFinite(b.rank);
+  if(ar !== br) return ar ? -1 : 1;
+  return ar ? a.rank - b.rank : (b.score || 0) - (a.score || 0);
+};
+
+function addPrpmQuery(qs, paper){
+  if(Number.isFinite(paper.rank)) qs.set('rank', String(paper.rank));
+  if(Number.isFinite(paper.score)) qs.set('score', String(paper.score));
+  if(typeof paper.explore === 'boolean') qs.set('explore', paper.explore ? '1' : '0');
+  if(paper.isNew) qs.set('badge', 'NEW');
+  return qs;
+}
+
+function whyEntries(paper){
+  if(!Array.isArray(paper.why)) return [];
+  return paper.why.map(reason => typeof reason === 'string'
+    ? {label:reason, weight:null}
+    : {label:String(reason?.label || ''), weight:Number.isFinite(reason?.weight) ? reason.weight : null})
+    .filter(reason => reason.label);
+}
+function whyHtml(paper){
+  const reasons = whyEntries(paper);
+  if(!reasons.length) return '';
+  return `<details class="score-why"><summary>推薦原因</summary><ul>${reasons.map(reason =>
+    `<li>${esc(reason.label)}${reason.weight===null ? '' : ` <span>${reason.weight>0?'+':''}${reason.weight}</span>`}</li>`
+  ).join('')}</ul></details>`;
+}
+function prpmBadgesHtml(paper){
+  let html = '';
+  if(paper.explore) html += '<span class="badge b-explore">探索</span>';
+  if(Number.isFinite(paper.kw_score)) html += `<span class="badge b-tag">Keyword ${paper.kw_score}</span>`;
+  return html;
+}
+function profileSummaryHtml(profile){
+  const events = profile?.events || {};
+  const items = rows => (rows || []).slice(0,5).map(row =>
+    `<li>${esc(String(row.feature || ''))} <span>${Number(row.weight)>0?'+':''}${Number(row.weight || 0).toFixed(2)}</span></li>`).join('');
+  return `<div class="profile-count">${Number(events.total || 0)} 個訊號 · 正向 ${Number(events.positive || 0)} · 負向 ${Number(events.negative || 0)}</div>
+    <div class="profile-columns"><div><strong>偏好</strong><ul>${items(profile?.top_liked)}</ul></div>
+    <div><strong>較少推薦</strong><ul>${items(profile?.top_avoided)}</ul></div></div>`;
+}
+async function loadProfileSummary(){
+  const target = document.getElementById('profileSummary');
+  if(!target) return;
+  try{
+    const response = await fetch('profile.json?_=' + Date.now());
+    if(!response.ok) return;
+    target.innerHTML = profileSummaryHtml(await response.json());
+  }catch{ /* keyword-only fallback */ }
+}
 
 const SYNC_LABELS = {
   sync: {pending:'待同步', synced:'已同步', blocked:'阻塞', failed:'失敗'},
@@ -497,8 +549,9 @@ function card(p){
     badges += `<a class="badge b-tag" href="/api/pdf?key=${encodeURIComponent(a.pdf_key)}" target="_blank">${ic('file')} 查看PDF</a>`;
   for(const t of (p.tags||[]).filter(t=>!/^(neg|penalty|design|author):/.test(t)).slice(0,4))
     badges += `<span class="badge b-tag">${esc(t)}</span>`;
+  badges += prpmBadgesHtml(p);
 
-  body.innerHTML = title + `<div class="badges">${badges}</div>` +
+  body.innerHTML = title + `<div class="badges">${badges}</div>` + whyHtml(p) +
     (p.abstract?`<div class="abs" id="abs-${p.item_id}">${formatAbs(p.abstract)}</div>`:'');
 
   // 📋 複製鈕：標題旁複製標題（貼 Google Scholar 搜全文）、摘要內複製摘要（貼 GPT 翻譯）
@@ -582,16 +635,24 @@ function toggle(p, key){
 // 標 seen（不重複送）。本 session 內 passSeen 不隱藏，下次重整才消失
 function markSeen(p){
   const a = actions[p.item_id] || (actions[p.item_id]={});
-  if(!a.seen){ a.seen = true; persist(p, 'seen', true); }
+  if(!a.seen){ a.seen = true; return persist(p, 'seen', true, {implicit:true}); }
 }
 // 🔬品質 / 📚內容：toggle 後一律標 seen
 function toggleAct(p, key){ toggle(p, key); markSeen(p); }
-function persist(p, key, val){
+function persist(p, key, val, extraCtx={}){
   // 本地也 bump updated（與 Worker 同格式）：剛按的卡在「看過時間」排序才會置頂，不用等重整回填
   const updated = new Date().toISOString();
   const a = actions[p.item_id]; if(a) a.updated = updated;
   save(LS_ACT, actions);
-  const op = {item_id:p.item_id, doi:p.doi, title:p.title, key, val, updated};
+  const ctx = {
+    ...(Number.isFinite(p.rank) ? {rank:p.rank} : {}),
+    ...(Number.isFinite(p.score) ? {score:p.score} : {}),
+    ...(typeof p.explore === 'boolean' ? {explore:p.explore} : {}),
+    ...(p.isNew ? {badge:'NEW'} : {}), ...extraCtx,
+  };
+  const event_id = globalThis.crypto?.randomUUID?.()
+    || `${updated}:${Math.random().toString(36).slice(2)}`;
+  const op = {item_id:p.item_id, doi:p.doi, title:p.title, key, val, updated, event_id, ctx};
   queueOp(op);
   return sendQueued(opId(op));
 }
@@ -603,7 +664,8 @@ function uploadForPaper(p, btn){
     const f = inp.files[0]; if(!f) return;
     if(f.type !== 'application/pdf'){ btn.textContent = '只接受PDF'; return; }
     btn.innerHTML = ic('hourglass')+' 上傳中';
-    const qs = new URLSearchParams({ item_id: p.item_id, doi: p.doi || '', title: p.title || '' });
+    const qs = addPrpmQuery(
+      new URLSearchParams({ item_id: p.item_id, doi: p.doi || '', title: p.title || '' }), p);
     try{
       const r = await fetch('/api/upload?' + qs.toString(),
         { method:'POST', headers:{'Content-Type':'application/pdf'}, body: f });

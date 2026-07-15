@@ -25,3 +25,5 @@ venv/
 wrangler.toml
 *.local
 _sync_tmp/
+_prpm_cache/
+site/profile.json

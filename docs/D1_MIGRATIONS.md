@@ -58,3 +58,18 @@ wrangler d1 execute paper-radar-db --remote --json \
 ```
 
 Expected new names are exactly the five listed above.
+
+## 2026-07-15: lightweight PRPM action log
+
+`migrations/2026-07-15-action-log.sql` creates the append-only `action_log` table, two lookup indexes, and one unique retry-deduplication index. Release 1 deliberately does not record `impression` events.
+
+`event_id` is created once with the browser queue operation and is unique. Retries reuse it and use `INSERT OR IGNORE`, while `created_at` remains server time so clock skew cannot distort 90-day decay.
+
+The Worker treats a missing table as non-fatal during rollout, but **production migration still requires Ting's explicit confirmation in the active session** before the event-enabled Worker is deployed.
+
+Verify afterward:
+
+```bash
+wrangler d1 execute paper-radar-db --remote --json \
+  --command "SELECT name FROM sqlite_schema WHERE type IN ('table','index') AND (name LIKE 'action_log%' OR name LIKE 'idx_action_log_%')"
+```

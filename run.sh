@@ -21,6 +21,9 @@ python enrich.py --recheck 60 --workers 6
 
 cp papers.json site/papers.json
 
+echo "=== PRPM（失敗時保留 keyword 排序）==="
+bash run_prpm.sh
+
 echo "=== deploy ==="
 wrangler pages deploy site --project-name=paper-radar --branch=main --commit-dirty=true
 

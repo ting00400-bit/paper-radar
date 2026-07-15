@@ -9,7 +9,7 @@ cd "$(dirname "$0")"
 HOST=youruser@your-host.example.com
 REMOTE=paper-radar
 
-FILES="enrich.py fetch_and_score.py run.sh deploy.sh config.yaml interest_model.json \
+FILES="enrich.py fetch_and_score.py export_action_log.py train_prpm.py run_prpm.sh run.sh deploy.sh config.yaml interest_model.json \
 schema.sql monitor_r2.py monitor_r2.sh notify_pending.py notify_pending.sh notify_digest.py \
 site/app.js site/index.html site/style.css site/_worker.js redeploy.sh"
 # 註：train_interest.py / training_log.jsonl 為本機端（canonical db+log 在本機），不推主機

@@ -48,7 +48,11 @@ export default {
           id, String(d.doi || "").slice(0, 120), String(d.title || "").slice(0, 300), val, ts,
           ...(pending ? ["pending"] : []));
         await statement.run();
-        return json({ ok: true });
+        const fallbackEventId = d.updated ? `legacy:${id}|${d.key}|${d.updated}` : "";
+        const eventId = String(d.event_id || fallbackEventId).slice(0, 160) || null;
+        const warning = await appendActionEvent(
+          env, id, actionEvent(d.key, val, d.ctx), d.ctx, ts, eventId);
+        return json({ ok: true, ...(warning ? { warning } : {}) });
       } catch (e) {
         return json({ error: "fail", detail: String(e) }, 500);
       }
@@ -91,7 +95,16 @@ export default {
           `INSERT INTO usage (month, uploads, bytes) VALUES (?1, 1, ?2)
            ON CONFLICT(month) DO UPDATE SET uploads=uploads+1, bytes=bytes+?2`
         ).bind(month, cl).run();
-        return json({ ok: true, key, item_id: id, manual: isManual });
+        const warning = await appendActionEvent(env, id, "pdf_upload", {
+          rank: Number(url.searchParams.get("rank") || NaN),
+          score: Number(url.searchParams.get("score") || NaN),
+          explore: url.searchParams.get("explore") === "1" ? true
+            : url.searchParams.get("explore") === "0" ? false : undefined,
+          badge: url.searchParams.get("badge") || undefined,
+          content: Boolean(content), deepread: Boolean(deepread), manual: isManual,
+        }, ts, null);
+        return json({ ok: true, key, item_id: id, manual: isManual,
+                      ...(warning ? { warning } : {}) });
       } catch (e) {
         return json({ error: "fail", detail: String(e) }, 500);
       }
@@ -141,7 +154,9 @@ export default {
           const paper = byId.get(String(action.item_id))
             || byDoi.get(String(action.doi || "").toLowerCase()) || {};
           const reasons = Array.isArray(paper.why)
-            ? paper.why.slice(0, 3).map(reason => String(reason).slice(0, 120)) : [];
+            ? paper.why.slice(0, 3).map(reason => String(
+                reason && typeof reason === "object" ? reason.label || "" : reason
+              ).slice(0, 120)).filter(Boolean) : [];
           return {
             item_id: String(action.item_id || "").slice(0, 64),
             doi: String(paper.doi || action.doi || "").slice(0, 120),
@@ -177,6 +192,43 @@ export default {
 
 function json(obj, status = 200) {
   return new Response(JSON.stringify(obj), { status, headers: { "Content-Type": "application/json" } });
+}
+
+function actionEvent(key, val, ctx) {
+  if (!val) return null;
+  if (key === "content" || key === "star") return "content_on";
+  if (key === "deepread") return "deepread_on";
+  if (key === "vote") return { up: "vote_up", neutral: "vote_mid", down: "vote_down" }[val] || null;
+  if (key === "seen" && !ctx?.implicit) return "seen_only";
+  return null;
+}
+
+function eventContext(ctx) {
+  if (!ctx || typeof ctx !== "object") return null;
+  const clean = {};
+  if (Number.isFinite(ctx.rank)) clean.rank = ctx.rank;
+  if (Number.isFinite(ctx.score)) clean.score = ctx.score;
+  if (typeof ctx.explore === "boolean") clean.explore = ctx.explore;
+  if (ctx.badge) clean.badge = String(ctx.badge).slice(0, 32);
+  if (typeof ctx.manual === "boolean") clean.manual = ctx.manual;
+  if (typeof ctx.content === "boolean") clean.content = ctx.content;
+  if (typeof ctx.deepread === "boolean") clean.deepread = ctx.deepread;
+  return Object.keys(clean).length ? clean : null;
+}
+
+async function appendActionEvent(env, itemId, event, ctx, ts, eventId) {
+  if (!event) return null;
+  try {
+    const context = eventContext(ctx);
+    await env.DB.prepare(
+      `INSERT OR IGNORE INTO action_log
+         (item_id, action, event_id, value, ctx_json, created_at)
+       VALUES (?1, ?2, ?3, NULL, ?4, ?5)`
+    ).bind(itemId, event, eventId, context ? JSON.stringify(context) : null, ts).run();
+    return null;
+  } catch (_) {
+    return "event_log_unavailable";
+  }
 }
 
 function publicSyncError(value) {

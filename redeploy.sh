@@ -7,8 +7,10 @@ set -e
 cd "$(dirname "$0")"
 export PATH=/usr/bin:/usr/local/bin:$PATH
 set -a; source .env; set +a
+source venv/bin/activate
 
 echo "=== 部署 site 到 CF Pages ==="
 cp papers.json site/papers.json
+bash run_prpm.sh
 wrangler pages deploy site --project-name=paper-radar --branch=main --commit-dirty=true
 echo "=== redeploy done ==="

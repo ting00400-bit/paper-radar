@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 
-function loadWorker({rows = [], papers = []} = {}) {
+function loadWorker({rows = [], papers = [], failActionLog = false} = {}) {
   const statements = [];
   const puts = [];
   const source = fs.readFileSync(path.join(__dirname, '..', 'site', '_worker.js'), 'utf8')
@@ -28,7 +28,12 @@ function loadWorker({rows = [], papers = []} = {}) {
           bind(...args) { call.args = args; return statement; },
           async first() { return null; },
           async all() { return {results: rows}; },
-          async run() { return {success: true}; },
+          async run() {
+            if (failActionLog && /INSERT(?: OR IGNORE)? INTO action_log/.test(sql)) {
+              throw new Error('no such table: action_log');
+            }
+            return {success: true};
+          },
         };
         return statement;
       },
@@ -75,7 +80,8 @@ test('GET /api/sync-status joins action state with scoring and sanitizes output'
   };
   const paper = {
     item_id: action.item_id, doi: action.doi, title: 'Generated title',
-    score: 8, kw_score: 6, rank: 3, explore: true, why: ['implant', 'recent'],
+    score: 8, kw_score: 6, rank: 3, explore: true,
+    why: [{label: 'implant', weight: 1.2}, 'recent'],
   };
   const {worker, env, statements} = loadWorker({rows: [action], papers: [paper]});
 
@@ -165,4 +171,93 @@ test('disabling a work action clears ghost status only when no work remains', as
   assert.match(sql, /(?:deepread=1 OR star=1|star=1 OR deepread=1)/);
   assert.match(sql, /ELSE NULL END/);
   assert.match(sql, /synced=0/);
+});
+
+test('content and vote actions append mapped events after current state succeeds', async () => {
+  const content = loadWorker();
+  const contentResponse = await content.worker.fetch({
+    ...request('https://radar.test/api/action', 'POST'),
+    async json() {
+      return {item_id: 'doi:10.1234/example', key: 'content', val: true, event_id: 'evt-one'};
+    },
+  }, content.env);
+  assert.equal(contentResponse.status, 200);
+  const contentLog = content.statements.find(call => /INSERT(?: OR IGNORE)? INTO action_log/.test(call.sql));
+  assert.ok(contentLog);
+  assert.match(contentLog.sql, /INSERT OR IGNORE INTO action_log/);
+  assert.ok(contentLog.args.includes('content_on'));
+  assert.equal(contentLog.args[2], 'evt-one');
+  assert.equal(contentLog.args[3], null);
+
+  const vote = loadWorker();
+  await vote.worker.fetch({
+    ...request('https://radar.test/api/action', 'POST'),
+    async json() { return {item_id: 'doi:10.1234/example', key: 'vote', val: 'down'}; },
+  }, vote.env);
+  const voteLog = vote.statements.find(call => /INSERT(?: OR IGNORE)? INTO action_log/.test(call.sql));
+  assert.ok(voteLog.args.includes('vote_down'));
+});
+
+test('missing action_log is non-fatal and returns a rollout warning', async () => {
+  const {worker, env} = loadWorker({failActionLog: true});
+  const response = await worker.fetch({
+    ...request('https://radar.test/api/action', 'POST'),
+    async json() { return {item_id: 'doi:10.1234/example', key: 'deepread', val: true}; },
+  }, env);
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), {ok: true, warning: 'event_log_unavailable'});
+});
+
+test('retrying the same action payload reuses its event identity', async () => {
+  const {worker, env, statements} = loadWorker();
+  const payload = {
+    item_id: 'doi:10.1234/retry', key: 'content', val: true,
+    event_id: 'evt-retry-one', updated: '2026-07-15T00:00:00.000Z',
+  };
+  for (let i = 0; i < 2; i++) {
+    await worker.fetch({
+      ...request('https://radar.test/api/action', 'POST'),
+      async json() { return payload; },
+    }, env);
+  }
+
+  const inserts = statements.filter(call => /INSERT OR IGNORE INTO action_log/.test(call.sql));
+  assert.equal(inserts.length, 2);
+  assert.deepEqual(inserts.map(call => call.args[2]), ['evt-retry-one', 'evt-retry-one']);
+});
+
+test('only an explicit seen action emits seen_only', async () => {
+  const explicit = loadWorker();
+  await explicit.worker.fetch({
+    ...request('https://radar.test/api/action', 'POST'),
+    async json() { return {item_id: 'doi:10.1234/example', key: 'seen', val: true}; },
+  }, explicit.env);
+  assert.ok(explicit.statements.some(call => call.args.includes('seen_only')));
+
+  const implicit = loadWorker();
+  await implicit.worker.fetch({
+    ...request('https://radar.test/api/action', 'POST'),
+    async json() {
+      return {item_id: 'doi:10.1234/example', key: 'seen', val: true, ctx: {implicit: true}};
+    },
+  }, implicit.env);
+  assert.equal(implicit.statements.some(call => /INSERT(?: OR IGNORE)? INTO action_log/.test(call.sql)), false);
+});
+
+test('successful upload appends pdf_upload event', async () => {
+  const {worker, env, statements} = loadWorker();
+  const response = await worker.fetch(request(
+    'https://radar.test/api/upload?item_id=doi%3A10.1234%2Fexample&doi=10.1234%2Fexample&title=Example&content=1&rank=6&score=5.3&explore=1&badge=NEW',
+    'POST', {stream: true}), env);
+
+  assert.equal(response.status, 200);
+  const event = statements.find(call => /INSERT(?: OR IGNORE)? INTO action_log/.test(call.sql));
+  assert.ok(event);
+  assert.ok(event.args.includes('pdf_upload'));
+  assert.equal(event.args[2], null);
+  assert.deepEqual(JSON.parse(event.args[3]), {
+    rank: 6, score: 5.3, explore: true, badge: 'NEW',
+    manual: false, content: true, deepread: false,
+  });
 });

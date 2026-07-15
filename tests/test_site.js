@@ -53,6 +53,7 @@ function loadApp({storage = {}, sharedValues, fetchImpl, locks}) {
       loadActionsFromServer,
       syncActionsOnLoad,
       persist,
+      markSeen,
       retryPendingOps,
       pending: () => pendingOps,
       currentActions: () => actions,
@@ -62,6 +63,12 @@ function loadApp({storage = {}, sharedValues, fetchImpl, locks}) {
       syncScoreText,
       syncApiError,
       syncCardHtml,
+      whyEntries,
+      whyHtml,
+      prpmBadgesHtml,
+      paperOrder,
+      profileSummaryHtml,
+      addPrpmQuery,
     };
   `;
   vm.createContext(context);
@@ -82,8 +89,12 @@ function makeLocks() {
 
 test('HTTP 500 keeps one pending operation and retry clears it', async () => {
   const responses = [{ok: false}, {ok: true}];
+  const sent = [];
   const {api, syncStatus} = loadApp({
-    fetchImpl: async () => responses.shift(),
+    fetchImpl: async (_url, options) => {
+      sent.push(JSON.parse(options.body));
+      return responses.shift();
+    },
   });
   const paper = {item_id: 'doi:one', doi: '10.1/one', title: 'One'};
 
@@ -96,6 +107,8 @@ test('HTTP 500 keeps one pending operation and retry clears it', async () => {
 
   assert.equal(Object.keys(api.pending()).length, 0);
   assert.equal(syncStatus.textContent, '');
+  assert.ok(sent[0].event_id);
+  assert.equal(sent[0].event_id, sent[1].event_id);
 });
 
 test('pending operation survives a fresh app instance and then retries', async () => {
@@ -317,4 +330,66 @@ test('sync API failures have a readable dashboard message and tab entry', () => 
 
   assert.equal(api.syncApiError(503), '同步狀態暫時無法載入（HTTP 503），請稍後重試。');
   assert.match(html, /data-tab="sync"[^>]*>同步狀態</);
+});
+
+test('automatic seen persistence carries implicit context', async () => {
+  const sent = [];
+  const {api} = loadApp({
+    fetchImpl: async (_url, options) => { sent.push(JSON.parse(options.body)); return {ok: true}; },
+  });
+  const paper = {item_id: 'doi:implicit', doi: '10.1/implicit', title: 'Implicit'};
+
+  await api.markSeen(paper);
+
+  assert.equal(sent[0].key, 'seen');
+  assert.deepEqual(sent[0].ctx, {implicit: true});
+});
+
+test('PRPM helpers support object and legacy string reasons', () => {
+  const {api} = loadApp({fetchImpl: async () => ({ok: true})});
+  const paper = {
+    kw_score: 5, explore: true,
+    why: [{label: 'peri-implantitis', weight: 1.25}, 'legacy reason'],
+  };
+
+  assert.deepEqual(JSON.parse(JSON.stringify(api.whyEntries(paper))), [
+    {label: 'peri-implantitis', weight: 1.25},
+    {label: 'legacy reason', weight: null},
+  ]);
+  assert.match(api.whyHtml(paper), /peri-implantitis/);
+  assert.match(api.prpmBadgesHtml(paper), /探索/);
+  assert.match(api.prpmBadgesHtml(paper), /Keyword 5/);
+});
+
+test('default PRPM ordering prefers rank and profile summary is public-safe', () => {
+  const {api} = loadApp({fetchImpl: async () => ({ok: true})});
+  const papers = [{rank: 2, score: 10}, {rank: 1, score: 5}];
+  papers.sort(api.paperOrder);
+  assert.equal(papers[0].rank, 1);
+
+  const html = api.profileSummaryHtml({
+    events: {total: 12, positive: 8, negative: 4},
+    top_liked: [{feature: '<implant>', weight: 2.1}],
+    top_avoided: [{feature: 'narrative review', weight: -1.2}],
+  });
+  assert.match(html, /12/);
+  assert.match(html, /&lt;implant&gt;/);
+  assert.doesNotMatch(html, /<implant>/);
+  const index = fs.readFileSync(path.join(root, 'site', 'index.html'), 'utf8');
+  assert.match(index, /id="profileSummary"/);
+});
+
+test('partial rank ordering stays transitive and upload carries PRPM context', () => {
+  const {api} = loadApp({fetchImpl: async () => ({ok: true})});
+  const papers = [{rank: 2, score: 2}, {score: 12}, {rank: 1, score: 1}];
+  papers.sort(api.paperOrder);
+  assert.deepEqual(papers.map(p => p.rank || null), [1, 2, null]);
+
+  const qs = api.addPrpmQuery(new URLSearchParams(), {
+    rank: 6, score: 5.3, explore: true, isNew: true,
+  });
+  assert.equal(qs.get('rank'), '6');
+  assert.equal(qs.get('score'), '5.3');
+  assert.equal(qs.get('explore'), '1');
+  assert.equal(qs.get('badge'), 'NEW');
 });
