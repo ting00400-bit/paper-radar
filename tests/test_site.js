@@ -63,6 +63,7 @@ function loadApp({storage = {}, sharedValues, fetchImpl, locks, innerWidth = 102
       syncScoreText,
       syncApiError,
       syncCardHtml,
+      paperTitleHtml,
       whyEntries,
       whyHtml,
       prpmBadgesHtml,
@@ -393,6 +394,71 @@ test('PRPM helpers support object and legacy string reasons', () => {
   assert.match(api.whyHtml(paper), /peri-implantitis/);
   assert.match(api.prpmBadgesHtml(paper), /探索/);
   assert.match(api.prpmBadgesHtml(paper), /Keyword 5/);
+});
+
+test('paper title links to source and falls back to text', () => {
+  const {api} = loadApp({fetchImpl: async () => ({ok: true})});
+
+  assert.match(
+    api.paperTitleHtml({title: '<RCT>', url: 'https://pubmed.ncbi.nlm.nih.gov/1/'}),
+    /<a class="c-title-link"[^>]*target="_blank"[^>]*>&lt;RCT&gt;<\/a>/,
+  );
+  assert.equal(
+    api.paperTitleHtml({title: '<No URL>'}),
+    '<span class="c-title-text">&lt;No URL&gt;</span>',
+  );
+});
+
+test('paper title rejects unsafe URL protocols', () => {
+  const {api} = loadApp({fetchImpl: async () => ({ok: true})});
+
+  assert.equal(
+    api.paperTitleHtml({title: '<Unsafe>', url: 'javascript:alert(1)'}),
+    '<span class="c-title-text">&lt;Unsafe&gt;</span>',
+  );
+});
+
+test('recommendation reasons are compact and limited to three', () => {
+  const {api} = loadApp({fetchImpl: async () => ({ok: true})});
+  const html = api.whyHtml({why: [
+    {label: 'implant', weight: 2},
+    {label: 'GBR', weight: 1.5},
+    {label: 'RCT', weight: 1},
+    {label: 'fourth', weight: 0.5},
+  ]});
+
+  assert.match(html, /class="recommendation"/);
+  assert.match(html, /implant \+2/);
+  assert.doesNotMatch(html, /<details/);
+  assert.doesNotMatch(html, /fourth/);
+});
+
+test('paper card source keeps primary and secondary action groups', () => {
+  const source = fs.readFileSync(path.join(root, 'site', 'app.js'), 'utf8');
+
+  assert.match(source, /acts-primary/);
+  assert.match(source, /整理筆記/);
+  assert.match(source, /上傳 PDF/);
+  assert.match(source, /acts-votes/);
+  assert.match(source, /more-actions/);
+  assert.match(source, /品質評讀/);
+  assert.match(source, /內容整理/);
+  assert.match(source, /aria-expanded/);
+  assert.match(source, /aria-controls/);
+});
+
+test('paper card score header does not interpolate raw score into HTML', () => {
+  const source = fs.readFileSync(path.join(root, 'site', 'app.js'), 'utf8');
+
+  assert.match(source, /paperScoreText/);
+  assert.doesNotMatch(source, /推薦分數 \$\{p\.score\}/);
+  assert.doesNotMatch(source, />\$\{p\.score\}<\/span>/);
+});
+
+test('site assets use the round 4 cache key', () => {
+  const html = fs.readFileSync(path.join(root, 'site', 'index.html'), 'utf8');
+  assert.match(html, /style\.css\?v=20260715d/);
+  assert.match(html, /app\.js\?v=20260715d/);
 });
 
 test('default PRPM ordering prefers rank and profile summary is public-safe', () => {

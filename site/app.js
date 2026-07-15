@@ -463,6 +463,21 @@ function addPrpmQuery(qs, paper){
   return qs;
 }
 
+function safePaperUrl(url){
+  const value = String(url || '').trim();
+  return /^https?:\/\//i.test(value) ? value : '';
+}
+function paperTitleHtml(paper){
+  const title = esc(paper.title || '');
+  const url = safePaperUrl(paper.url);
+  return url
+    ? `<a class="c-title-link" href="${esc(url)}" target="_blank" rel="noopener">${title}</a>`
+    : `<span class="c-title-text">${title}</span>`;
+}
+function paperScoreText(paper){
+  const score = Number(paper.score);
+  return Number.isFinite(score) ? String(score) : '—';
+}
 function whyEntries(paper){
   if(!Array.isArray(paper.why)) return [];
   return paper.why.map(reason => typeof reason === 'string'
@@ -471,11 +486,11 @@ function whyEntries(paper){
     .filter(reason => reason.label);
 }
 function whyHtml(paper){
-  const reasons = whyEntries(paper);
+  const reasons = whyEntries(paper).slice(0, 3);
   if(!reasons.length) return '';
-  return `<details class="score-why"><summary>推薦原因</summary><ul>${reasons.map(reason =>
-    `<li>${esc(reason.label)}${reason.weight===null ? '' : ` <span>${reason.weight>0?'+':''}${reason.weight}</span>`}</li>`
-  ).join('')}</ul></details>`;
+  return `<p class="recommendation"><span>推薦：</span>${reasons.map(reason =>
+    `${esc(reason.label)}${reason.weight===null ? '' : ` ${reason.weight>0?'+':''}${reason.weight}`}`
+  ).join(' · ')}</p>`;
 }
 function prpmBadgesHtml(paper){
   let html = '';
@@ -601,14 +616,6 @@ function card(p){
   const el = document.createElement('div');
   el.className = 'card' + (a.vote==='down'?' down':'') + (a.seen?' seen':'');
 
-  const sc = document.createElement('div');
-  sc.className = 'score' + (p.score>=5?' hi':p.score>=3?' mid':'');
-  sc.textContent = p.score;
-
-  const body = document.createElement('div'); body.style.flex='1';
-  const title = `<div class="c-title">${esc(p.title)}</div>
-    <div class="c-src">${esc(p.source_name)}${p.pub_date?' · '+p.pub_date:''}${p.authors?' · '+esc(p.authors.split(',').slice(0,3).join(','))+(p.authors.split(',').length>3?' et al.':''):''}</div>`;
-
   // 徽章
   let badges = '';
   if(p.isNew) badges += `<span class="badge b-new">${ic('sparkles')} NEW</span>`;
@@ -624,36 +631,78 @@ function card(p){
     badges += `<span class="badge b-tag">${esc(t)}</span>`;
   badges += prpmBadgesHtml(p);
 
-  body.innerHTML = title + `<div class="badges">${badges}</div>` + whyHtml(p) +
-    (p.abstract?`<div class="abs" id="abs-${p.item_id}">${formatAbs(p.abstract)}</div>`:'');
+  const body = document.createElement('div');
+  body.className = 'c-body';
+  const score = Number(p.score);
+  const scoreText = paperScoreText(p);
+  body.innerHTML = `<div class="c-head">
+      <span class="score${score>=5?' hi':score>=3?' mid':''}" aria-label="推薦分數 ${scoreText}">${scoreText}</span>
+      <div class="c-title">${paperTitleHtml(p)}</div>
+    </div>
+    <div class="c-src">${esc(p.source_name)}${p.pub_date?' · '+p.pub_date:''}${p.authors?' · '+esc(p.authors.split(',').slice(0,3).join(','))+(p.authors.split(',').length>3?' et al.':''):''}</div>
+    <div class="badges">${badges}</div>
+    ${whyHtml(p)}`;
 
   // 📋 複製鈕：標題旁複製標題（貼 Google Scholar 搜全文）、摘要內複製摘要（貼 GPT 翻譯）
   body.querySelector('.c-title').appendChild(copyBtn(()=>p.title, '複製標題'));
-  const absEl = body.querySelector('.abs');
-  if(absEl) absEl.prepend(copyBtn(()=>p.abstract, '複製摘要'));
+  if(p.abstract){
+    const abstractId = `abs-${p.item_id}`;
+    const toggleButton = document.createElement('button');
+    toggleButton.type = 'button';
+    toggleButton.className = 'summary-toggle';
+    toggleButton.setAttribute('aria-expanded', 'false');
+    toggleButton.setAttribute('aria-controls', abstractId);
+    toggleButton.innerHTML = `${ic('chevdown')} 摘要`;
+    const abstract = document.createElement('div');
+    abstract.className = 'abs';
+    abstract.id = abstractId;
+    abstract.innerHTML = formatAbs(p.abstract);
+    abstract.prepend(copyBtn(()=>p.abstract, '複製摘要'));
+    toggleButton.onclick = () => {
+      const expanded = toggleButton.getAttribute('aria-expanded') !== 'true';
+      toggleButton.setAttribute('aria-expanded', String(expanded));
+      toggleButton.innerHTML = `${ic(expanded ? 'chevdown' : 'chevright')} ${expanded ? '收合摘要' : '摘要'}`;
+      abstract.classList.toggle('show', expanded);
+    };
+    body.append(toggleButton, abstract);
+  }
 
-  // 動作鈕：已看(左) | 品質 | 內容 | 筆記 | 讚/普/爛 | 上傳PDF
+  // 動作鈕：主要動作 | 評價 | 更多整理方式
   // 品質/內容 任一顆 = /paper-sync 跑共用前置(DOI核對+Zotero+抓全文)後分流；按任一鈕都隱含標 seen
-  const acts = document.createElement('div'); acts.className='acts';
-  acts.appendChild(actBtn(ic('eye')+' 已看','seen',!!a.seen,()=>toggle(p,'seen')));
-  acts.appendChild(actBtn(ic('microscope')+' 品質','deepread',!!a.deepread,()=>toggleAct(p,'deepread')));
-  acts.appendChild(actBtn(ic('book')+' 內容','content',!!a.content,()=>toggleAct(p,'content')));
-  acts.appendChild(actBtn(ic('pen')+' 筆記','star',!!a.star,()=>toggleAct(p,'star'),'整理筆記：下次論文同步時產出 Obsidian 筆記'));
-  acts.appendChild(actBtn(ic('thumbup'),'up vote',a.vote==='up',()=>setVote(p,'up'),'讚'));
-  acts.appendChild(actBtn(ic('meh'),'neutral vote',a.vote==='neutral',()=>setVote(p,'neutral'),'普通'));
-  acts.appendChild(actBtn(ic('thumbdown'),'down vote',a.vote==='down',()=>setVote(p,'down'),'不喜歡'));
-  const upBtn = document.createElement('button');
-  upBtn.className = 'act upload'; upBtn.innerHTML = a.pdf_key ? ic('check')+' 已上傳' : ic('paperclip')+' 上傳PDF';
-  upBtn.onclick = () => uploadForPaper(p, upBtn);
-  acts.appendChild(upBtn);
-  body.appendChild(acts);
+  const actionsBox = document.createElement('div');
+  actionsBox.className = 'acts';
+  const primary = document.createElement('div');
+  primary.className = 'acts-primary';
+  primary.appendChild(actBtn(ic('eye')+' 已看','seen',!!a.seen,()=>toggle(p,'seen')));
+  primary.appendChild(actBtn(ic('pen')+' 整理筆記','star',!!a.star,()=>toggleAct(p,'star')));
+  const upload = document.createElement('button');
+  upload.type = 'button';
+  upload.className = 'act upload';
+  upload.innerHTML = a.pdf_key ? ic('check')+' 已上傳' : ic('paperclip')+' 上傳 PDF';
+  upload.onclick = () => uploadForPaper(p, upload);
+  primary.appendChild(upload);
 
-  body.querySelector('.c-title').onclick = () => {
-    const ab = document.getElementById('abs-'+p.item_id);
-    if(ab) ab.classList.toggle('show');
-  };
+  const votes = document.createElement('div');
+  votes.className = 'acts-votes';
+  votes.setAttribute('aria-label', '論文評價');
+  votes.appendChild(actBtn(ic('thumbup'),'up vote',a.vote==='up',()=>setVote(p,'up'),'讚'));
+  votes.appendChild(actBtn(ic('meh'),'neutral vote',a.vote==='neutral',()=>setVote(p,'neutral'),'普通'));
+  votes.appendChild(actBtn(ic('thumbdown'),'down vote',a.vote==='down',()=>setVote(p,'down'),'不喜歡'));
+  actionsBox.append(primary, votes);
+  body.appendChild(actionsBox);
 
-  el.appendChild(sc); el.appendChild(body);
+  const more = document.createElement('details');
+  more.className = 'more-actions';
+  const moreSummary = document.createElement('summary');
+  moreSummary.textContent = '更多整理方式';
+  const moreButtons = document.createElement('div');
+  moreButtons.className = 'more-actions-buttons';
+  moreButtons.appendChild(actBtn(ic('microscope')+' 品質評讀','deepread',!!a.deepread,()=>toggleAct(p,'deepread')));
+  moreButtons.appendChild(actBtn(ic('book')+' 內容整理','content',!!a.content,()=>toggleAct(p,'content')));
+  more.append(moreSummary, moreButtons);
+  body.appendChild(more);
+
+  el.appendChild(body);
 
   // 本 session 剛按過動作的卡：反灰停留 2.5 秒再淡出收合。
   // 期間可補按第二顆鈕（每次 render 重新計時）；淡出後視同「載入前已看」，切「已看」tab 找得回來。
@@ -685,12 +734,14 @@ function copyBtn(getText, tip){
 }
 
 function actBtn(label, cls, on, fn, tip){
-  const b = document.createElement('button');
-  b.className = 'act ' + cls.split(' ')[0] + (on?' on':'');
-  b.innerHTML = label;
-  if(tip){ b.title = tip; b.setAttribute('aria-label', tip); }
-  b.onclick = () => { fn(); render(); };
-  return b;
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'act ' + cls.split(' ')[0] + (on?' on':'');
+  button.innerHTML = label;
+  button.setAttribute('aria-pressed', String(!!on));
+  if(tip) button.setAttribute('aria-label', tip);
+  button.onclick = () => { fn(); render(); };
+  return button;
 }
 
 function setVote(p, v){
