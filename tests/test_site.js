@@ -8,7 +8,7 @@ const root = path.resolve(__dirname, '..');
 const pendingStorageKey = (itemId, key) =>
   `pr_pending_op_v1:${encodeURIComponent(`${itemId}\u0000${key}`)}`;
 
-function loadApp({storage = {}, sharedValues, fetchImpl, locks}) {
+function loadApp({storage = {}, sharedValues, fetchImpl, locks, innerWidth = 1024}) {
   const values = sharedValues || new Map(Object.entries(storage));
   const listeners = {};
   const syncStatus = {
@@ -28,7 +28,7 @@ function loadApp({storage = {}, sharedValues, fetchImpl, locks}) {
     requestAnimationFrame: fn => fn(),
     navigator: {clipboard: {writeText: async () => {}}, ...(locks ? {locks} : {})},
     window: {
-      innerWidth: 1024,
+      innerWidth,
       addEventListener: (name, fn) => { listeners[name] = fn; },
     },
     document: {
@@ -69,6 +69,12 @@ function loadApp({storage = {}, sharedValues, fetchImpl, locks}) {
       paperOrder,
       profileSummaryHtml,
       addPrpmQuery,
+      initialFilter,
+      paperInTab,
+      pageSlice,
+      nextPageCount,
+      pageSize: () => PAGE_SIZE,
+      shouldFadeSeenCard,
     };
   `;
   vm.createContext(context);
@@ -392,4 +398,63 @@ test('partial rank ordering stays transitive and upload carries PRPM context', (
   assert.equal(qs.get('score'), '5.3');
   assert.equal(qs.get('explore'), '1');
   assert.equal(qs.get('badge'), 'NEW');
+});
+
+test('first visit defaults to weekly on mobile and unseen on desktop', () => {
+  const {api} = loadApp({fetchImpl: async () => ({ok: true})});
+
+  assert.equal(api.initialFilter(null, 390).tab, 'weekly');
+  assert.equal(api.initialFilter(null, 1024).tab, 'unseen');
+});
+
+test('saved tab is not overwritten by viewport width', () => {
+  const {api} = loadApp({fetchImpl: async () => ({ok: true})});
+  const saved = {badge: 'oa', sort: 'date', search: 'implant', tab: 'seen'};
+
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(api.initialFilter(saved, 390))),
+    saved,
+  );
+  const legacy = api.initialFilter({badge: 'all', sort: 'score', search: '', showSeen: true}, 390);
+  assert.equal(legacy.tab, 'seen');
+  assert.equal('showSeen' in legacy, false);
+});
+
+test('weekly tab includes only new papers that are not already seen', () => {
+  const {api} = loadApp({fetchImpl: async () => ({ok: true})});
+  const fresh = {item_id: 'doi:fresh', isNew: true};
+  const old = {item_id: 'doi:old', isNew: false};
+
+  assert.equal(api.paperInTab(fresh, 'weekly', {}, false), true);
+  assert.equal(api.paperInTab(old, 'weekly', {}, false), false);
+  assert.equal(api.paperInTab(fresh, 'weekly', {seen: true}, true), false);
+  assert.equal(api.paperInTab(fresh, 'weekly', {seen: true}, false), true);
+  assert.equal(api.paperInTab(fresh, 'seen', {seen: true}, true), true);
+});
+
+test('weekly seen cards start the same fade transition as unseen cards', () => {
+  const {api} = loadApp({fetchImpl: async () => ({ok: true})});
+  const seen = {seen: true};
+
+  assert.equal(api.shouldFadeSeenCard('weekly', seen, false), true);
+  assert.equal(api.shouldFadeSeenCard('unseen', seen, false), true);
+  assert.equal(api.shouldFadeSeenCard('weekly', seen, true), false);
+  assert.equal(api.shouldFadeSeenCard('seen', seen, false), false);
+});
+
+test('paper batches are limited to 25 and grow by 25', () => {
+  const {api} = loadApp({fetchImpl: async () => ({ok: true})});
+  const papers = Array.from({length: 61}, (_, index) => ({item_id: `p${index}`}));
+
+  assert.equal(api.pageSize(), 25);
+  assert.equal(api.pageSlice(papers, 25).length, 25);
+  assert.equal(api.nextPageCount(25, papers.length), 50);
+  assert.equal(api.nextPageCount(50, papers.length), 61);
+});
+
+test('index exposes weekly tab and one load-more control', () => {
+  const html = fs.readFileSync(path.join(root, 'site', 'index.html'), 'utf8');
+
+  assert.match(html, /data-tab="weekly"[^>]*>本週新文</);
+  assert.equal((html.match(/id="loadMore"/g) || []).length, 1);
 });

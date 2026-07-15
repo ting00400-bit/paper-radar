@@ -6,6 +6,34 @@ const LS_TOPIC = 'pr_topics_v1';    // 主題開關 {group:bool}
 const LS_FILT = 'pr_filters_v1';    // {badge,sort,search,tab}
 const PENDING_PREFIX = 'pr_pending_op_v1:'; // 每個 item_id+key 獨立存，避免多分頁互蓋
 const API = '/api/action';          // Worker(step 4)；失敗則純本地
+const PAGE_SIZE = 25;
+
+function initialFilter(saved, width){
+  const filter = {
+    badge: 'all', sort: 'score', search: '',
+    tab: width < 600 ? 'weekly' : 'unseen',
+    ...(saved || {}),
+  };
+  if(saved && saved.tab === undefined && 'showSeen' in saved){
+    filter.tab = saved.showSeen ? 'seen' : 'unseen';
+    delete filter.showSeen;
+  }
+  return filter;
+}
+
+function paperInTab(paper, tab, action={}, wasSeenAtLoad=false){
+  if(tab === 'seen') return !!action.seen;
+  if(tab === 'weekly' && !paper.isNew) return false;
+  if(!action.seen) return true;
+  return !wasSeenAtLoad;
+}
+
+function shouldFadeSeenCard(tab, action={}, wasSeenAtLoad=false){
+  return (tab === 'unseen' || tab === 'weekly') && !!action.seen && !wasSeenAtLoad;
+}
+
+const pageSlice = (papers, count) => papers.slice(0, count);
+const nextPageCount = (current, total) => Math.min(current + PAGE_SIZE, total);
 
 function opId(op){ return `${op.item_id}\u0000${op.key}`; }
 function pendingStorageKey(id){ return PENDING_PREFIX + encodeURIComponent(id); }
@@ -31,9 +59,9 @@ let actions = load(LS_ACT, {});
 let pendingOps = loadPendingOps();
 const inFlight = {};
 let topics = load(LS_TOPIC, null);
-let filt = load(LS_FILT, {badge:'all', sort:'score', search:'', tab:'unseen'});
-// 一次性遷移：舊版用 showSeen checkbox，映射到 tab 後不再讀寫 showSeen
-if(filt.tab === undefined){ filt.tab = filt.showSeen ? 'seen' : 'unseen'; delete filt.showSeen; }
+let filt = initialFilter(load(LS_FILT, null), window.innerWidth);
+let visibleCount = PAGE_SIZE;
+function resetPagination(){ visibleCount = PAGE_SIZE; }
 const seenAtLoad = new Set();        // 開頁當下已 seen 的 item_id → 只有「載入前就已看」的才隱藏；本 session 新點的留著（可再點第二顆鈕）
 let headCollapsed = load('pr_headcollapse_v1', window.innerWidth < 600);
 const hideTimers = new Map();        // item_id → 動作後延遲淡出的計時器（render 時全部重置）
@@ -187,6 +215,7 @@ async function init(){
   buildVisitBanner();
   bindFilters();
   bindTabs();
+  bindLoadMore();
   syncSortOptions();
   bindUpload();
   bindHeadToggle();
@@ -248,7 +277,7 @@ function buildTopics(){
     const b = document.createElement('div');
     b.className = 'topic' + (topics[k] ? ' on' : '');
     b.textContent = v.label;
-    b.onclick = () => { topics[k]=!topics[k]; save(LS_TOPIC,topics); b.classList.toggle('on'); render(); };
+    b.onclick = () => { topics[k]=!topics[k]; save(LS_TOPIC,topics); b.classList.toggle('on'); renderFromStart(); };
     box.appendChild(b);
   }
 }
@@ -267,19 +296,19 @@ function buildVisitBanner(){
     filt.badge = (filt.badge==='visit') ? 'all' : 'visit';
     save(LS_FILT,filt); syncBadgeUI();
     el.innerHTML = filt.badge==='visit' ? labelOn : labelOff;
-    render();
+    renderFromStart();
   };
 }
 
 function bindFilters(){
   const s = document.getElementById('search');
   s.value = filt.search || '';
-  s.oninput = () => { filt.search=s.value; save(LS_FILT,filt); render(); };
+  s.oninput = () => { filt.search=s.value; save(LS_FILT,filt); renderFromStart(); };
   const sort = document.getElementById('sort');
   sort.value = filt.sort;
-  sort.onchange = () => { filt.sort=sort.value; save(LS_FILT,filt); render(); };
+  sort.onchange = () => { filt.sort=sort.value; save(LS_FILT,filt); renderFromStart(); };
   document.querySelectorAll('#badgeFilter .chip').forEach(c => {
-    c.onclick = () => { filt.badge=c.dataset.badge; save(LS_FILT,filt); syncBadgeUI(); render(); };
+    c.onclick = () => { filt.badge=c.dataset.badge; save(LS_FILT,filt); syncBadgeUI(); renderFromStart(); };
   });
   syncBadgeUI();
 }
@@ -291,18 +320,31 @@ function syncBadgeUI(){
 function bindTabs(){
   document.querySelectorAll('#tabs .tab').forEach(t => {
     t.onclick = () => {
-      filt.tab = t.dataset.tab; save(LS_FILT, filt); syncSortOptions(); render();
+      filt.tab = t.dataset.tab; save(LS_FILT, filt); syncSortOptions(); renderFromStart();
       if(filt.tab === 'sync' && syncLoadState === 'idle') loadSyncItems();
     };
   });
 }
+function bindLoadMore(){
+  const button = document.getElementById('loadMore');
+  button.onclick = () => {
+    const total = Number(button.dataset.total || 0);
+    visibleCount = nextPageCount(visibleCount, total);
+    render();
+  };
+}
+function renderFromStart(){
+  resetPagination();
+  render();
+}
 // 筆數以「主題+badge+搜尋過濾後」為分母（與 footer 同基準），兩 tab 各自計數
-function syncTabUI(unseenN, seenN){
+function syncTabUI(unseenN, seenN, weeklyN){
   document.querySelectorAll('#tabs .tab').forEach(t => {
     t.classList.toggle('on', t.dataset.tab === filt.tab);
-    t.textContent = t.dataset.tab === 'seen' ? `已看 (${seenN})`
-      : t.dataset.tab === 'sync' ? `同步狀態${syncLoadState === 'ready' ? ` (${syncItems.length})` : ''}`
-      : `未看 (${unseenN})`;
+    t.textContent = t.dataset.tab === 'weekly' ? `本週新文 (${weeklyN})`
+      : t.dataset.tab === 'unseen' ? `全部未看 (${unseenN})`
+      : t.dataset.tab === 'seen' ? `已看 (${seenN})`
+      : `同步狀態${syncLoadState === 'ready' ? ` (${syncItems.length})` : ''}`;
   });
 }
 
@@ -343,12 +385,14 @@ function passSearch(p){
   return (p.title+' '+p.authors+' '+p.source_name).toLowerCase().includes(q);
 }
 
-// 分頁分流：已看 tab 只留 seen；未看 tab 留未 seen 或「本 session 剛按、還在淡出緩衝期」的
-function passSeen(p){
-  const a = actions[p.item_id] || {};
-  if(filt.tab === 'seen') return !!a.seen;
-  if(!a.seen) return true;
-  return !seenAtLoad.has(p.item_id);
+// 分頁分流：已看 tab 只留 seen；未看 / 本週 tab 留未 seen 或「本 session 剛按、還在淡出緩衝期」的
+function passTab(p){
+  return paperInTab(
+    p,
+    filt.tab,
+    actions[p.item_id] || {},
+    seenAtLoad.has(p.item_id),
+  );
 }
 
 function render(){
@@ -357,22 +401,43 @@ function render(){
   const list = document.getElementById('list');
   const base = DATA.papers.filter(p => passTopic(p) && passBadge(p) && passSearch(p));
   let seenN = 0;
-  for(const p of base) if((actions[p.item_id]||{}).seen) seenN++;
-  syncTabUI(base.length - seenN, seenN);
+  let weeklyN = 0;
+  for(const p of base){
+    const seen = !!(actions[p.item_id] || {}).seen;
+    if(seen) seenN++;
+    if(p.isNew && !seen) weeklyN++;
+  }
+  syncTabUI(base.length - seenN, seenN, weeklyN);
   if(filt.tab === 'sync'){
     renderSyncDashboard();
+    document.getElementById('loadMore').classList.add('hidden');
     return;
   }
-  const ps = base.filter(passSeen);
+  const ps = base.filter(passTab);
   const upd = p => (actions[p.item_id]||{}).updated || '';
   ps.sort(filt.sort==='date'
     ? (a,b)=> dateValue(b).localeCompare(dateValue(a))
     : filt.sort==='seenat'
     ? (a,b)=> upd(b).localeCompare(upd(a)) || b.score - a.score
     : paperOrder);
+  const visible = pageSlice(ps, visibleCount);
   list.innerHTML = '';
-  for(const p of ps) list.appendChild(card(p));
-  document.getElementById('count').textContent = `顯示 ${ps.length} 篇`;
+  if(!ps.length){
+    list.innerHTML = `<div class="empty-state">${filt.tab === 'weekly'
+      ? '本週沒有新文。<button id="showAllUnseen" type="button">查看全部未看</button>'
+      : '目前沒有符合條件的論文。'}</div>`;
+    document.getElementById('showAllUnseen')?.addEventListener('click', () => {
+      filt.tab = 'unseen';
+      save(LS_FILT, filt);
+      renderFromStart();
+    });
+  } else {
+    for(const p of visible) list.appendChild(card(p));
+  }
+  const more = document.getElementById('loadMore');
+  more.dataset.total = String(ps.length);
+  more.classList.toggle('hidden', visible.length >= ps.length);
+  document.getElementById('count').textContent = `顯示 ${visible.length} / ${ps.length} 篇`;
 }
 
 const dateValue = p => p.pub_date_sort || p.first_seen || '';
@@ -584,7 +649,7 @@ function card(p){
 
   // 本 session 剛按過動作的卡：反灰停留 2.5 秒再淡出收合。
   // 期間可補按第二顆鈕（每次 render 重新計時）；淡出後視同「載入前已看」，切「已看」tab 找得回來。
-  if(filt.tab === 'unseen' && a.seen && !seenAtLoad.has(p.item_id)){
+  if(shouldFadeSeenCard(filt.tab, a, seenAtLoad.has(p.item_id))){
     hideTimers.set(p.item_id, setTimeout(() => {
       el.style.maxHeight = el.scrollHeight + 'px';
       requestAnimationFrame(() => { el.classList.add('fadeout'); el.style.maxHeight = '0'; });

@@ -20,9 +20,10 @@
 
   <div id="visitBanner" class="visit-banner hidden"></div>
 
-  <!-- 已看/未看分頁（常駐，不隨 headExtra 收合） -->
+  <!-- 分頁（常駐，不隨 headExtra 收合） -->
   <div class="tabs" id="tabs">
-    <button class="tab" data-tab="unseen">未看</button>
+    <button class="tab" data-tab="weekly">本週新文</button>
+    <button class="tab" data-tab="unseen">全部未看</button>
     <button class="tab" data-tab="seen">已看</button>
     <button class="tab" data-tab="sync">同步狀態</button>
   </div>
@@ -74,6 +75,7 @@
 </header>
 
 <main id="list"></main>
+<button id="loadMore" class="load-more hidden" type="button">載入更多</button>
 <footer><span id="count"></span> · 牙醫師 林晉廷 · 私人學習站</footer>
 
 <script src="app.js?v=20260715c"></script>
