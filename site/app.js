@@ -273,12 +273,20 @@ function bindUpload(){
 function buildTopics(){
   const box = document.getElementById('topics');
   box.innerHTML = '';
-  for(const [k,v] of Object.entries(DATA.topic_groups)){
-    const b = document.createElement('div');
-    b.className = 'topic' + (topics[k] ? ' on' : '');
-    b.textContent = v.label;
-    b.onclick = () => { topics[k]=!topics[k]; save(LS_TOPIC,topics); b.classList.toggle('on'); renderFromStart(); };
-    box.appendChild(b);
+  for(const [key,value] of Object.entries(DATA.topic_groups)){
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'topic' + (topics[key] ? ' on' : '');
+    button.textContent = value.label;
+    button.setAttribute('aria-pressed', String(!!topics[key]));
+    button.onclick = () => {
+      topics[key] = !topics[key];
+      save(LS_TOPIC, topics);
+      button.classList.toggle('on');
+      button.setAttribute('aria-pressed', String(!!topics[key]));
+      renderFromStart();
+    };
+    box.appendChild(button);
   }
 }
 

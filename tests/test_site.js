@@ -287,6 +287,34 @@ test('header contains the unsynced operation indicator', () => {
   assert.match(html, /id="syncStatus"/);
 });
 
+test('form controls have accessible names and styles expose focus state', () => {
+  const html = fs.readFileSync(path.join(root, 'site', 'index.html'), 'utf8');
+  const css = fs.readFileSync(path.join(root, 'site', 'style.css'), 'utf8');
+
+  for(const id of ['search', 'upFile', 'upTitle', 'upDoi', 'sort']){
+    assert.match(html, new RegExp(`id="${id}"[^>]*aria-label="[^"]+"`));
+  }
+  assert.match(css, /:focus-visible/);
+  assert.match(css, /min-height:\s*44px/);
+});
+
+test('mobile touch targets include buttons and native summaries', () => {
+  const css = fs.readFileSync(path.join(root, 'site', 'style.css'), 'utf8');
+  const rule = css.match(/@media \(max-width:599px\)\{\s*([^{}]+)\{min-height:\s*44px\}/);
+  assert.ok(rule);
+
+  const selectors = rule[1].split(',').map(selector => selector.trim());
+  assert.ok(selectors.includes('button'), 'mobile touch targets must include buttons');
+  assert.ok(selectors.includes('summary'), 'mobile touch targets must include native summaries');
+});
+
+test('topic toggles are native pressed buttons', () => {
+  const source = fs.readFileSync(path.join(root, 'site', 'app.js'), 'utf8');
+
+  assert.match(source, /document\.createElement\('button'\)/);
+  assert.match(source, /setAttribute\('aria-pressed'/);
+});
+
 test('sync dashboard labels expose actionable Traditional Chinese states', () => {
   const {api} = loadApp({fetchImpl: async () => ({ok: true})});
 
