@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex, nofollow">
 <title>論文學習雷達</title>
-<link rel="stylesheet" href="style.css?v=20260715c">
+<link rel="stylesheet" href="style.css?v=20260715d">
 </head>
 <body>
 <header>
@@ -20,9 +20,10 @@
 
   <div id="visitBanner" class="visit-banner hidden"></div>
 
-  <!-- 已看/未看分頁（常駐，不隨 headExtra 收合） -->
+  <!-- 分頁（常駐，不隨 headExtra 收合） -->
   <div class="tabs" id="tabs">
-    <button class="tab" data-tab="unseen">未看</button>
+    <button class="tab" data-tab="weekly">本週新文</button>
+    <button class="tab" data-tab="unseen">全部未看</button>
     <button class="tab" data-tab="seen">已看</button>
     <button class="tab" data-tab="sync">同步狀態</button>
   </div>
@@ -30,15 +31,15 @@
   <!-- 可折疊：搜尋 + 訂閱 + 上傳 + 篩選 -->
   <div id="headExtra" class="head-extra">
     <!-- 搜尋 -->
-    <input type="search" id="search" placeholder="搜尋標題 / 作者 / 期刊…">
+    <input type="search" id="search" aria-label="搜尋論文" placeholder="搜尋標題 / 作者 / 期刊…">
 
     <!-- 上傳外部論文（非 RSS 來源） -->
     <details class="upload">
       <summary><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="M12 5v14"/></svg> 上傳外部論文（非雷達來源，給 Claude 跑全文）</summary>
       <div class="upload-body">
-        <input type="file" id="upFile" accept="application/pdf">
-        <input type="text" id="upTitle" placeholder="標題（選填）">
-        <input type="text" id="upDoi" placeholder="DOI（選填，有的話更好）">
+        <input type="file" id="upFile" aria-label="選擇外部論文 PDF" accept="application/pdf">
+        <input type="text" id="upTitle" aria-label="外部論文標題" placeholder="標題（選填）">
+        <input type="text" id="upDoi" aria-label="外部論文 DOI" placeholder="DOI（選填，有的話更好）">
         <div class="up-modes">
           <label class="up-check"><input type="checkbox" id="upContent" checked> <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg> 內容整理（/paper-digest）</label>
           <label class="up-check"><input type="checkbox" id="upQuality"> <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 18h8"/><path d="M3 22h18"/><path d="M14 22a7 7 0 1 0 0-14h-1"/><path d="M9 14h2"/><path d="M9 12a2 2 0 0 1-2-2V6h6v4a2 2 0 0 1-2 2Z"/><path d="M12 6V3a1 1 0 0 0-1-1H9a1 1 0 0 0-1 1v3"/></svg> 品質評讀（/paper-review）</label>
@@ -58,7 +59,7 @@
 
     <!-- 篩選列 -->
     <div class="filter-row">
-      <select id="sort">
+      <select id="sort" aria-label="論文排序方式">
         <option value="score">分數高→低</option>
         <option value="date">最新優先</option>
       </select>
@@ -74,8 +75,9 @@
 </header>
 
 <main id="list"></main>
+<button id="loadMore" class="load-more hidden" type="button">載入更多</button>
 <footer><span id="count"></span> · 牙醫師 林晉廷 · 私人學習站</footer>
 
-<script src="app.js?v=20260715c"></script>
+<script src="app.js?v=20260715d"></script>
 </body>
 </html>

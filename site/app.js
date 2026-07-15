@@ -6,6 +6,34 @@ const LS_TOPIC = 'pr_topics_v1';    // 主題開關 {group:bool}
 const LS_FILT = 'pr_filters_v1';    // {badge,sort,search,tab}
 const PENDING_PREFIX = 'pr_pending_op_v1:'; // 每個 item_id+key 獨立存，避免多分頁互蓋
 const API = '/api/action';          // Worker(step 4)；失敗則純本地
+const PAGE_SIZE = 25;
+
+function initialFilter(saved, width){
+  const filter = {
+    badge: 'all', sort: 'score', search: '',
+    tab: width < 600 ? 'weekly' : 'unseen',
+    ...(saved || {}),
+  };
+  if(saved && saved.tab === undefined && 'showSeen' in saved){
+    filter.tab = saved.showSeen ? 'seen' : 'unseen';
+    delete filter.showSeen;
+  }
+  return filter;
+}
+
+function paperInTab(paper, tab, action={}, wasSeenAtLoad=false){
+  if(tab === 'seen') return !!action.seen;
+  if(tab === 'weekly' && !paper.isNew) return false;
+  if(!action.seen) return true;
+  return !wasSeenAtLoad;
+}
+
+function shouldFadeSeenCard(tab, action={}, wasSeenAtLoad=false){
+  return (tab === 'unseen' || tab === 'weekly') && !!action.seen && !wasSeenAtLoad;
+}
+
+const pageSlice = (papers, count) => papers.slice(0, count);
+const nextPageCount = (current, total) => Math.min(current + PAGE_SIZE, total);
 
 function opId(op){ return `${op.item_id}\u0000${op.key}`; }
 function pendingStorageKey(id){ return PENDING_PREFIX + encodeURIComponent(id); }
@@ -31,9 +59,9 @@ let actions = load(LS_ACT, {});
 let pendingOps = loadPendingOps();
 const inFlight = {};
 let topics = load(LS_TOPIC, null);
-let filt = load(LS_FILT, {badge:'all', sort:'score', search:'', tab:'unseen'});
-// 一次性遷移：舊版用 showSeen checkbox，映射到 tab 後不再讀寫 showSeen
-if(filt.tab === undefined){ filt.tab = filt.showSeen ? 'seen' : 'unseen'; delete filt.showSeen; }
+let filt = initialFilter(load(LS_FILT, null), window.innerWidth);
+let visibleCount = PAGE_SIZE;
+function resetPagination(){ visibleCount = PAGE_SIZE; }
 const seenAtLoad = new Set();        // 開頁當下已 seen 的 item_id → 只有「載入前就已看」的才隱藏；本 session 新點的留著（可再點第二顆鈕）
 let headCollapsed = load('pr_headcollapse_v1', window.innerWidth < 600);
 const hideTimers = new Map();        // item_id → 動作後延遲淡出的計時器（render 時全部重置）
@@ -187,6 +215,7 @@ async function init(){
   buildVisitBanner();
   bindFilters();
   bindTabs();
+  bindLoadMore();
   syncSortOptions();
   bindUpload();
   bindHeadToggle();
@@ -244,12 +273,20 @@ function bindUpload(){
 function buildTopics(){
   const box = document.getElementById('topics');
   box.innerHTML = '';
-  for(const [k,v] of Object.entries(DATA.topic_groups)){
-    const b = document.createElement('div');
-    b.className = 'topic' + (topics[k] ? ' on' : '');
-    b.textContent = v.label;
-    b.onclick = () => { topics[k]=!topics[k]; save(LS_TOPIC,topics); b.classList.toggle('on'); render(); };
-    box.appendChild(b);
+  for(const [key,value] of Object.entries(DATA.topic_groups)){
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'topic' + (topics[key] ? ' on' : '');
+    button.textContent = value.label;
+    button.setAttribute('aria-pressed', String(!!topics[key]));
+    button.onclick = () => {
+      topics[key] = !topics[key];
+      save(LS_TOPIC, topics);
+      button.classList.toggle('on');
+      button.setAttribute('aria-pressed', String(!!topics[key]));
+      renderFromStart();
+    };
+    box.appendChild(button);
   }
 }
 
@@ -267,19 +304,19 @@ function buildVisitBanner(){
     filt.badge = (filt.badge==='visit') ? 'all' : 'visit';
     save(LS_FILT,filt); syncBadgeUI();
     el.innerHTML = filt.badge==='visit' ? labelOn : labelOff;
-    render();
+    renderFromStart();
   };
 }
 
 function bindFilters(){
   const s = document.getElementById('search');
   s.value = filt.search || '';
-  s.oninput = () => { filt.search=s.value; save(LS_FILT,filt); render(); };
+  s.oninput = () => { filt.search=s.value; save(LS_FILT,filt); renderFromStart(); };
   const sort = document.getElementById('sort');
   sort.value = filt.sort;
-  sort.onchange = () => { filt.sort=sort.value; save(LS_FILT,filt); render(); };
+  sort.onchange = () => { filt.sort=sort.value; save(LS_FILT,filt); renderFromStart(); };
   document.querySelectorAll('#badgeFilter .chip').forEach(c => {
-    c.onclick = () => { filt.badge=c.dataset.badge; save(LS_FILT,filt); syncBadgeUI(); render(); };
+    c.onclick = () => { filt.badge=c.dataset.badge; save(LS_FILT,filt); syncBadgeUI(); renderFromStart(); };
   });
   syncBadgeUI();
 }
@@ -291,18 +328,31 @@ function syncBadgeUI(){
 function bindTabs(){
   document.querySelectorAll('#tabs .tab').forEach(t => {
     t.onclick = () => {
-      filt.tab = t.dataset.tab; save(LS_FILT, filt); syncSortOptions(); render();
+      filt.tab = t.dataset.tab; save(LS_FILT, filt); syncSortOptions(); renderFromStart();
       if(filt.tab === 'sync' && syncLoadState === 'idle') loadSyncItems();
     };
   });
 }
+function bindLoadMore(){
+  const button = document.getElementById('loadMore');
+  button.onclick = () => {
+    const total = Number(button.dataset.total || 0);
+    visibleCount = nextPageCount(visibleCount, total);
+    render();
+  };
+}
+function renderFromStart(){
+  resetPagination();
+  render();
+}
 // 筆數以「主題+badge+搜尋過濾後」為分母（與 footer 同基準），兩 tab 各自計數
-function syncTabUI(unseenN, seenN){
+function syncTabUI(unseenN, seenN, weeklyN){
   document.querySelectorAll('#tabs .tab').forEach(t => {
     t.classList.toggle('on', t.dataset.tab === filt.tab);
-    t.textContent = t.dataset.tab === 'seen' ? `已看 (${seenN})`
-      : t.dataset.tab === 'sync' ? `同步狀態${syncLoadState === 'ready' ? ` (${syncItems.length})` : ''}`
-      : `未看 (${unseenN})`;
+    t.textContent = t.dataset.tab === 'weekly' ? `本週新文 (${weeklyN})`
+      : t.dataset.tab === 'unseen' ? `全部未看 (${unseenN})`
+      : t.dataset.tab === 'seen' ? `已看 (${seenN})`
+      : `同步狀態${syncLoadState === 'ready' ? ` (${syncItems.length})` : ''}`;
   });
 }
 
@@ -343,12 +393,14 @@ function passSearch(p){
   return (p.title+' '+p.authors+' '+p.source_name).toLowerCase().includes(q);
 }
 
-// 分頁分流：已看 tab 只留 seen；未看 tab 留未 seen 或「本 session 剛按、還在淡出緩衝期」的
-function passSeen(p){
-  const a = actions[p.item_id] || {};
-  if(filt.tab === 'seen') return !!a.seen;
-  if(!a.seen) return true;
-  return !seenAtLoad.has(p.item_id);
+// 分頁分流：已看 tab 只留 seen；未看 / 本週 tab 留未 seen 或「本 session 剛按、還在淡出緩衝期」的
+function passTab(p){
+  return paperInTab(
+    p,
+    filt.tab,
+    actions[p.item_id] || {},
+    seenAtLoad.has(p.item_id),
+  );
 }
 
 function render(){
@@ -357,22 +409,43 @@ function render(){
   const list = document.getElementById('list');
   const base = DATA.papers.filter(p => passTopic(p) && passBadge(p) && passSearch(p));
   let seenN = 0;
-  for(const p of base) if((actions[p.item_id]||{}).seen) seenN++;
-  syncTabUI(base.length - seenN, seenN);
+  let weeklyN = 0;
+  for(const p of base){
+    const seen = !!(actions[p.item_id] || {}).seen;
+    if(seen) seenN++;
+    if(p.isNew && !seen) weeklyN++;
+  }
+  syncTabUI(base.length - seenN, seenN, weeklyN);
   if(filt.tab === 'sync'){
     renderSyncDashboard();
+    document.getElementById('loadMore').classList.add('hidden');
     return;
   }
-  const ps = base.filter(passSeen);
+  const ps = base.filter(passTab);
   const upd = p => (actions[p.item_id]||{}).updated || '';
   ps.sort(filt.sort==='date'
     ? (a,b)=> dateValue(b).localeCompare(dateValue(a))
     : filt.sort==='seenat'
     ? (a,b)=> upd(b).localeCompare(upd(a)) || b.score - a.score
     : paperOrder);
+  const visible = pageSlice(ps, visibleCount);
   list.innerHTML = '';
-  for(const p of ps) list.appendChild(card(p));
-  document.getElementById('count').textContent = `顯示 ${ps.length} 篇`;
+  if(!ps.length){
+    list.innerHTML = `<div class="empty-state">${filt.tab === 'weekly'
+      ? '本週沒有新文。<button id="showAllUnseen" type="button">查看全部未看</button>'
+      : '目前沒有符合條件的論文。'}</div>`;
+    document.getElementById('showAllUnseen')?.addEventListener('click', () => {
+      filt.tab = 'unseen';
+      save(LS_FILT, filt);
+      renderFromStart();
+    });
+  } else {
+    for(const p of visible) list.appendChild(card(p));
+  }
+  const more = document.getElementById('loadMore');
+  more.dataset.total = String(ps.length);
+  more.classList.toggle('hidden', visible.length >= ps.length);
+  document.getElementById('count').textContent = `顯示 ${visible.length} / ${ps.length} 篇`;
 }
 
 const dateValue = p => p.pub_date_sort || p.first_seen || '';
@@ -390,6 +463,21 @@ function addPrpmQuery(qs, paper){
   return qs;
 }
 
+function safePaperUrl(url){
+  const value = String(url || '').trim();
+  return /^https?:\/\//i.test(value) ? value : '';
+}
+function paperTitleHtml(paper){
+  const title = esc(paper.title || '');
+  const url = safePaperUrl(paper.url);
+  return url
+    ? `<a class="c-title-link" href="${esc(url)}" target="_blank" rel="noopener">${title}</a>`
+    : `<span class="c-title-text">${title}</span>`;
+}
+function paperScoreText(paper){
+  const score = Number(paper.score);
+  return Number.isFinite(score) ? String(score) : '—';
+}
 function whyEntries(paper){
   if(!Array.isArray(paper.why)) return [];
   return paper.why.map(reason => typeof reason === 'string'
@@ -398,11 +486,11 @@ function whyEntries(paper){
     .filter(reason => reason.label);
 }
 function whyHtml(paper){
-  const reasons = whyEntries(paper);
+  const reasons = whyEntries(paper).slice(0, 3);
   if(!reasons.length) return '';
-  return `<details class="score-why"><summary>推薦原因</summary><ul>${reasons.map(reason =>
-    `<li>${esc(reason.label)}${reason.weight===null ? '' : ` <span>${reason.weight>0?'+':''}${reason.weight}</span>`}</li>`
-  ).join('')}</ul></details>`;
+  return `<p class="recommendation"><span>推薦：</span>${reasons.map(reason =>
+    `${esc(reason.label)}${reason.weight===null ? '' : ` ${reason.weight>0?'+':''}${reason.weight}`}`
+  ).join(' · ')}</p>`;
 }
 function prpmBadgesHtml(paper){
   let html = '';
@@ -528,14 +616,6 @@ function card(p){
   const el = document.createElement('div');
   el.className = 'card' + (a.vote==='down'?' down':'') + (a.seen?' seen':'');
 
-  const sc = document.createElement('div');
-  sc.className = 'score' + (p.score>=5?' hi':p.score>=3?' mid':'');
-  sc.textContent = p.score;
-
-  const body = document.createElement('div'); body.style.flex='1';
-  const title = `<div class="c-title">${esc(p.title)}</div>
-    <div class="c-src">${esc(p.source_name)}${p.pub_date?' · '+p.pub_date:''}${p.authors?' · '+esc(p.authors.split(',').slice(0,3).join(','))+(p.authors.split(',').length>3?' et al.':''):''}</div>`;
-
   // 徽章
   let badges = '';
   if(p.isNew) badges += `<span class="badge b-new">${ic('sparkles')} NEW</span>`;
@@ -551,40 +631,82 @@ function card(p){
     badges += `<span class="badge b-tag">${esc(t)}</span>`;
   badges += prpmBadgesHtml(p);
 
-  body.innerHTML = title + `<div class="badges">${badges}</div>` + whyHtml(p) +
-    (p.abstract?`<div class="abs" id="abs-${p.item_id}">${formatAbs(p.abstract)}</div>`:'');
+  const body = document.createElement('div');
+  body.className = 'c-body';
+  const score = Number(p.score);
+  const scoreText = paperScoreText(p);
+  body.innerHTML = `<div class="c-head">
+      <span class="score${score>=5?' hi':score>=3?' mid':''}" aria-label="推薦分數 ${scoreText}">${scoreText}</span>
+      <div class="c-title">${paperTitleHtml(p)}</div>
+    </div>
+    <div class="c-src">${esc(p.source_name)}${p.pub_date?' · '+p.pub_date:''}${p.authors?' · '+esc(p.authors.split(',').slice(0,3).join(','))+(p.authors.split(',').length>3?' et al.':''):''}</div>
+    <div class="badges">${badges}</div>
+    ${whyHtml(p)}`;
 
   // 📋 複製鈕：標題旁複製標題（貼 Google Scholar 搜全文）、摘要內複製摘要（貼 GPT 翻譯）
   body.querySelector('.c-title').appendChild(copyBtn(()=>p.title, '複製標題'));
-  const absEl = body.querySelector('.abs');
-  if(absEl) absEl.prepend(copyBtn(()=>p.abstract, '複製摘要'));
+  if(p.abstract){
+    const abstractId = `abs-${p.item_id}`;
+    const toggleButton = document.createElement('button');
+    toggleButton.type = 'button';
+    toggleButton.className = 'summary-toggle';
+    toggleButton.setAttribute('aria-expanded', 'false');
+    toggleButton.setAttribute('aria-controls', abstractId);
+    toggleButton.innerHTML = `${ic('chevdown')} 摘要`;
+    const abstract = document.createElement('div');
+    abstract.className = 'abs';
+    abstract.id = abstractId;
+    abstract.innerHTML = formatAbs(p.abstract);
+    abstract.prepend(copyBtn(()=>p.abstract, '複製摘要'));
+    toggleButton.onclick = () => {
+      const expanded = toggleButton.getAttribute('aria-expanded') !== 'true';
+      toggleButton.setAttribute('aria-expanded', String(expanded));
+      toggleButton.innerHTML = `${ic(expanded ? 'chevdown' : 'chevright')} ${expanded ? '收合摘要' : '摘要'}`;
+      abstract.classList.toggle('show', expanded);
+    };
+    body.append(toggleButton, abstract);
+  }
 
-  // 動作鈕：已看(左) | 品質 | 內容 | 筆記 | 讚/普/爛 | 上傳PDF
+  // 動作鈕：主要動作 | 評價 | 更多整理方式
   // 品質/內容 任一顆 = /paper-sync 跑共用前置(DOI核對+Zotero+抓全文)後分流；按任一鈕都隱含標 seen
-  const acts = document.createElement('div'); acts.className='acts';
-  acts.appendChild(actBtn(ic('eye')+' 已看','seen',!!a.seen,()=>toggle(p,'seen')));
-  acts.appendChild(actBtn(ic('microscope')+' 品質','deepread',!!a.deepread,()=>toggleAct(p,'deepread')));
-  acts.appendChild(actBtn(ic('book')+' 內容','content',!!a.content,()=>toggleAct(p,'content')));
-  acts.appendChild(actBtn(ic('pen')+' 筆記','star',!!a.star,()=>toggleAct(p,'star'),'整理筆記：下次論文同步時產出 Obsidian 筆記'));
-  acts.appendChild(actBtn(ic('thumbup'),'up vote',a.vote==='up',()=>setVote(p,'up'),'讚'));
-  acts.appendChild(actBtn(ic('meh'),'neutral vote',a.vote==='neutral',()=>setVote(p,'neutral'),'普通'));
-  acts.appendChild(actBtn(ic('thumbdown'),'down vote',a.vote==='down',()=>setVote(p,'down'),'不喜歡'));
-  const upBtn = document.createElement('button');
-  upBtn.className = 'act upload'; upBtn.innerHTML = a.pdf_key ? ic('check')+' 已上傳' : ic('paperclip')+' 上傳PDF';
-  upBtn.onclick = () => uploadForPaper(p, upBtn);
-  acts.appendChild(upBtn);
-  body.appendChild(acts);
+  const actionsBox = document.createElement('div');
+  actionsBox.className = 'acts';
+  const primary = document.createElement('div');
+  primary.className = 'acts-primary';
+  primary.appendChild(actBtn(ic('eye')+' 已看','seen',!!a.seen,()=>toggle(p,'seen')));
+  primary.appendChild(actBtn(ic('pen')+' 整理筆記','star',!!a.star,()=>toggleAct(p,'star')));
+  const upload = document.createElement('button');
+  upload.type = 'button';
+  upload.className = 'act upload';
+  upload.innerHTML = a.pdf_key ? ic('check')+' 已上傳' : ic('paperclip')+' 上傳 PDF';
+  upload.onclick = () => uploadForPaper(p, upload);
+  primary.appendChild(upload);
 
-  body.querySelector('.c-title').onclick = () => {
-    const ab = document.getElementById('abs-'+p.item_id);
-    if(ab) ab.classList.toggle('show');
-  };
+  const votes = document.createElement('div');
+  votes.className = 'acts-votes';
+  votes.setAttribute('aria-label', '論文評價');
+  votes.appendChild(actBtn(ic('thumbup'),'up vote',a.vote==='up',()=>setVote(p,'up'),'讚'));
+  votes.appendChild(actBtn(ic('meh'),'neutral vote',a.vote==='neutral',()=>setVote(p,'neutral'),'普通'));
+  votes.appendChild(actBtn(ic('thumbdown'),'down vote',a.vote==='down',()=>setVote(p,'down'),'不喜歡'));
+  actionsBox.append(primary, votes);
+  body.appendChild(actionsBox);
 
-  el.appendChild(sc); el.appendChild(body);
+  const more = document.createElement('details');
+  more.className = 'more-actions';
+  const moreSummary = document.createElement('summary');
+  moreSummary.textContent = '更多整理方式';
+  const moreButtons = document.createElement('div');
+  moreButtons.className = 'more-actions-buttons';
+  moreButtons.appendChild(actBtn(ic('microscope')+' 品質評讀','deepread',!!a.deepread,()=>toggleAct(p,'deepread')));
+  moreButtons.appendChild(actBtn(ic('book')+' 內容整理','content',!!a.content,()=>toggleAct(p,'content')));
+  more.append(moreSummary, moreButtons);
+  body.appendChild(more);
+
+  el.appendChild(body);
 
   // 本 session 剛按過動作的卡：反灰停留 2.5 秒再淡出收合。
   // 期間可補按第二顆鈕（每次 render 重新計時）；淡出後視同「載入前已看」，切「已看」tab 找得回來。
-  if(filt.tab === 'unseen' && a.seen && !seenAtLoad.has(p.item_id)){
+  if(shouldFadeSeenCard(filt.tab, a, seenAtLoad.has(p.item_id))){
     hideTimers.set(p.item_id, setTimeout(() => {
       el.style.maxHeight = el.scrollHeight + 'px';
       requestAnimationFrame(() => { el.classList.add('fadeout'); el.style.maxHeight = '0'; });
@@ -612,12 +734,14 @@ function copyBtn(getText, tip){
 }
 
 function actBtn(label, cls, on, fn, tip){
-  const b = document.createElement('button');
-  b.className = 'act ' + cls.split(' ')[0] + (on?' on':'');
-  b.innerHTML = label;
-  if(tip){ b.title = tip; b.setAttribute('aria-label', tip); }
-  b.onclick = () => { fn(); render(); };
-  return b;
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'act ' + cls.split(' ')[0] + (on?' on':'');
+  button.innerHTML = label;
+  button.setAttribute('aria-pressed', String(!!on));
+  if(tip) button.setAttribute('aria-label', tip);
+  button.onclick = () => { fn(); render(); };
+  return button;
 }
 
 function setVote(p, v){
