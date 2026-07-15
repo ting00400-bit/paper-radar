@@ -8,7 +8,9 @@ import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
-SCRIPT_DIR = Path(__file__).resolve().parent
+# Keep a mapped drive (for example Z:) as a drive path. Path.resolve() turns it
+# into UNC, which cmd.exe cannot use as cwd when launching npx.cmd.
+SCRIPT_DIR = Path(__file__).absolute().parent
 D1_NAME = 'paper-radar-db'
 DEFAULT_OUT = SCRIPT_DIR / '_prpm_cache' / 'events.json'
 

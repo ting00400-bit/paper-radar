@@ -1,5 +1,6 @@
 import json
 import os
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -54,3 +55,7 @@ def test_failed_export_preserves_last_good_cache(tmp_path):
         export_action_log.export_snapshot(destination, runner=runner)
 
     assert destination.read_text(encoding='utf-8') == '{"last":"good"}'
+
+
+def test_script_directory_keeps_the_process_absolute_path():
+    assert export_action_log.SCRIPT_DIR == Path(export_action_log.__file__).absolute().parent
