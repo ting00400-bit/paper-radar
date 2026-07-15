@@ -4,7 +4,7 @@
 
 **Goal:** Prevent Paper Radar actions from disappearing when `/api/action` fails, and make “最新優先” use a normalized sortable date.
 
-**Architecture:** Keep the static HTML/CSS/JS architecture. Store idempotent action assignments in one localStorage map keyed by `item_id + key`, overlay those pending assignments after loading D1, and retry them on page load or the browser `online` event. Normalize publication dates while producing `papers.json`; the browser only compares `pub_date_sort` with `first_seen` as fallback.
+**Architecture:** Keep the static HTML/CSS/JS architecture. Store each idempotent action assignment under its own localStorage key, overlay pending assignments after loading D1, and retry them on page load or the browser `online` event. Use Web Locks to serialize the same `item_id + key` across tabs. Normalize publication dates while producing `papers.json`; the browser only compares `pub_date_sort` with `first_seen` as fallback.
 
 **Tech Stack:** Python 3 standard library, pytest, browser-native JavaScript, Node.js built-in test runner; no new dependency or framework.
 
@@ -92,10 +92,10 @@ Expected: all tests pass.
 - Modify: `site/index.html`
 
 **Interfaces:**
-- Storage key: `pr_pending_ops_v1`.
-- Queue shape: object keyed by `item_id + "\u0000" + key`; values are the exact `/api/action` JSON payload plus `updated`.
+- Storage prefix: `pr_pending_op_v1:`; each `item_id + "\u0000" + key` has its own encoded key so tabs cannot overwrite unrelated operations.
+- Queue values are the exact `/api/action` JSON payload plus `updated`.
 - `persist(paper, key, value)` returns the send Promise; existing click handlers may ignore it.
-- `retryPendingOps()` retries current queue entries and removes only the exact version that succeeded.
+- `retryPendingOps()` retries current queue entries and removes only the exact version that succeeded; Web Locks serialize the same key across tabs when available.
 
 - [ ] **Step 1: Write failing Node tests using `node:test` and a VM-loaded `site/app.js`**
 
@@ -128,6 +128,14 @@ test('the same item and key keep only the latest assignment', async () => {
   // Assert one queue entry whose val is false.
 });
 
+test('initial state load finishes before online retry can clear its overlay', async () => {
+  // The online listener must not exist until the D1 snapshot is merged and pending ops retried.
+});
+
+test('two tabs keep different keys and serialize the same key', async () => {
+  // Shared localStorage retains both keys; a shared Web Lock leaves the latest value last in D1.
+});
+
 test('dateValue prefers pub_date_sort and falls back to first_seen', () => {
   assert.equal(api.dateValue({pub_date_sort:'2026-07-01', first_seen:'2026-01-01'}), '2026-07-01');
   assert.equal(api.dateValue({first_seen:'2026-01-01'}), '2026-01-01');
@@ -143,9 +151,22 @@ Expected: failure because `pendingOps`, `retryPendingOps`, and `dateValue` do no
 - [ ] **Step 3: Implement the minimum queue and merge behavior in `site/app.js`**
 
 ```javascript
-const LS_PENDING = 'pr_pending_ops_v1';
-let pendingOps = load(LS_PENDING, {});
-const opId = op => `${op.item_id}\u0000${op.key}`;
+const PENDING_PREFIX = 'pr_pending_op_v1:';
+function opId(op){ return `${op.item_id}\u0000${op.key}`; }
+function pendingStorageKey(id){ return PENDING_PREFIX + encodeURIComponent(id); }
+
+function loadPendingOps(){
+  const ops = {};
+  for(let i=0; i<localStorage.length; i++){
+    const key = localStorage.key(i);
+    if(!key?.startsWith(PENDING_PREFIX)) continue;
+    const op = JSON.parse(localStorage.getItem(key));
+    if(op?.item_id && op?.key) ops[opId(op)] = op;
+  }
+  return ops;
+}
+
+let pendingOps = loadPendingOps();
 
 function updateSyncStatus(){
   const el = document.getElementById('syncStatus');
@@ -156,17 +177,16 @@ function updateSyncStatus(){
 }
 
 function queueOp(op){
-  pendingOps[opId(op)] = op;
-  save(LS_PENDING, pendingOps);
+  localStorage.setItem(pendingStorageKey(opId(op)), JSON.stringify(op));
+  pendingOps = loadPendingOps();
   updateSyncStatus();
 }
 
 const inFlight = {};
-function sendQueued(id){
-  if(inFlight[id]) return inFlight[id];
-  inFlight[id] = (async () => {
-    while(pendingOps[id]){
-      const op = pendingOps[id];
+async function sendLoop(id){
+  while(true){
+      const op = readPending(id);
+      if(!op) break;
       let response;
       try{
         response = await fetch(API, {
@@ -176,21 +196,36 @@ function sendQueued(id){
         return false;
       }
       if(!response.ok) return false;
-      if(JSON.stringify(pendingOps[id]) === JSON.stringify(op)) delete pendingOps[id];
-      save(LS_PENDING, pendingOps);
+      if(JSON.stringify(readPending(id)) === JSON.stringify(op))
+        localStorage.removeItem(pendingStorageKey(id));
+      pendingOps = loadPendingOps();
       updateSyncStatus();
-    }
-    return true;
-  })().finally(() => { delete inFlight[id]; });
+  }
+  return true;
+}
+
+function sendQueued(id){
+  if(inFlight[id]) return inFlight[id];
+  const run = () => sendLoop(id);
+  inFlight[id] = (navigator.locks?.request
+    ? navigator.locks.request(`paper-radar-action:${id}`, run)
+    : run()).finally(() => { delete inFlight[id]; });
   return inFlight[id];
 }
 
 async function retryPendingOps(){
+  pendingOps = loadPendingOps();
   await Promise.all(Object.keys(pendingOps).map(sendQueued));
+}
+
+async function syncActionsOnLoad(){
+  await loadActionsFromServer();
+  await retryPendingOps();
+  window.addEventListener('online', retryPendingOps);
 }
 ```
 
-`persist` must enqueue before calling `sendQueued(opId(op))`. The per-key chain prevents an older request from arriving after and overwriting a newer assignment. `loadActionsFromServer` must build the D1 map and then apply every pending assignment to that map before saving it. Register `window.addEventListener('online', retryPendingOps)`, show the status before network work, and retry after the initial D1 load.
+`persist` must enqueue before calling `sendQueued(opId(op))`. The per-key lock prevents an older request from arriving after and overwriting a newer assignment, even across tabs. `loadActionsFromServer` must build the D1 map, then apply every pending assignment and keep the maximum `updated` timestamp. Register online/storage listeners only after the initial D1 snapshot and retry sequence finishes.
 
 Add this header element:
 

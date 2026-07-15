@@ -4,12 +4,31 @@
 const LS_ACT = 'pr_actions_v1';     // 各篇動作 {item_id:{vote,star,zotero,deepread}}
 const LS_TOPIC = 'pr_topics_v1';    // 主題開關 {group:bool}
 const LS_FILT = 'pr_filters_v1';    // {badge,sort,search,tab}
-const LS_PENDING = 'pr_pending_ops_v1'; // 尚未成功寫入 D1 的 idempotent 設定操作
+const PENDING_PREFIX = 'pr_pending_op_v1:'; // 每個 item_id+key 獨立存，避免多分頁互蓋
 const API = '/api/action';          // Worker(step 4)；失敗則純本地
+
+function opId(op){ return `${op.item_id}\u0000${op.key}`; }
+function pendingStorageKey(id){ return PENDING_PREFIX + encodeURIComponent(id); }
+function readPending(id){
+  try{ return JSON.parse(localStorage.getItem(pendingStorageKey(id))); }
+  catch{ return null; }
+}
+function loadPendingOps(){
+  const ops = {};
+  for(let i=0; i<localStorage.length; i++){
+    const key = localStorage.key(i);
+    if(!key || !key.startsWith(PENDING_PREFIX)) continue;
+    try{
+      const op = JSON.parse(localStorage.getItem(key));
+      if(op?.item_id && op?.key) ops[opId(op)] = op;
+    }catch{ /* ignore malformed local entry */ }
+  }
+  return ops;
+}
 
 let DATA = null;
 let actions = load(LS_ACT, {});
-let pendingOps = load(LS_PENDING, {});
+let pendingOps = loadPendingOps();
 const inFlight = {};
 let topics = load(LS_TOPIC, null);
 let filt = load(LS_FILT, {badge:'all', sort:'score', search:'', tab:'unseen'});
@@ -47,8 +66,6 @@ function ic(name){
   return `<svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name]}</svg>`;
 }
 
-const opId = op => `${op.item_id}\u0000${op.key}`;
-
 function updateSyncStatus(){
   const el = document.getElementById('syncStatus');
   if(!el) return;
@@ -58,16 +75,15 @@ function updateSyncStatus(){
 }
 
 function queueOp(op){
-  pendingOps[opId(op)] = op;
-  save(LS_PENDING, pendingOps);
+  localStorage.setItem(pendingStorageKey(opId(op)), JSON.stringify(op));
+  pendingOps = loadPendingOps();
   updateSyncStatus();
 }
 
-function sendQueued(id){
-  if(inFlight[id]) return inFlight[id];
-  inFlight[id] = (async () => {
-    while(pendingOps[id]){
-      const op = pendingOps[id];
+async function sendLoop(id){
+  while(true){
+      const op = readPending(id);
+      if(!op) break;
       let response;
       try{
         response = await fetch(API, {method:'POST', headers:{'Content-Type':'application/json'},
@@ -76,20 +92,27 @@ function sendQueued(id){
         return false;
       }
       if(!response.ok) return false;
-      if(JSON.stringify(pendingOps[id]) === JSON.stringify(op)) delete pendingOps[id];
-      save(LS_PENDING, pendingOps);
+      if(JSON.stringify(readPending(id)) === JSON.stringify(op))
+        localStorage.removeItem(pendingStorageKey(id));
+      pendingOps = loadPendingOps();
       updateSyncStatus();
-    }
-    return true;
-  })().finally(() => { delete inFlight[id]; });
+  }
+  return true;
+}
+
+function sendQueued(id){
+  if(inFlight[id]) return inFlight[id];
+  const run = () => sendLoop(id);
+  inFlight[id] = (navigator.locks?.request
+    ? navigator.locks.request(`paper-radar-action:${id}`, run)
+    : run()).finally(() => { delete inFlight[id]; });
   return inFlight[id];
 }
 
 async function retryPendingOps(){
+  pendingOps = loadPendingOps();
   await Promise.all(Object.keys(pendingOps).map(sendQueued));
 }
-
-window.addEventListener('online', retryPendingOps);
 
 // 從 D1 載入動作狀態（跨瀏覽器真實來源；失敗則沿用 localStorage）
 async function loadActionsFromServer(){
@@ -109,11 +132,12 @@ async function loadActionsFromServer(){
       if(a.updated) e.updated = a.updated;   // 最後互動時間（已看 tab「看過時間」排序用）
       if(Object.keys(e).length) map[a.item_id] = e;
     }
+    pendingOps = loadPendingOps();
     for(const op of Object.values(pendingOps)){
       const e = map[op.item_id] || (map[op.item_id] = {});
       if(op.val) e[op.key] = op.val;
       else delete e[op.key];
-      e.updated = op.updated;
+      if(!e.updated || op.updated > e.updated) e.updated = op.updated;
       if(op.key === 'seen') op.val ? seenAtLoad.add(op.item_id) : seenAtLoad.delete(op.item_id);
     }
     actions = map;
@@ -121,6 +145,18 @@ async function loadActionsFromServer(){
   }catch(e){ /* keep localStorage */ }
 }
 function save(k,v){ localStorage.setItem(k, JSON.stringify(v)); }
+
+async function syncActionsOnLoad(){
+  await loadActionsFromServer();
+  await retryPendingOps();
+  window.addEventListener('online', retryPendingOps);
+  window.addEventListener('storage', event => {
+    if(!event.key?.startsWith(PENDING_PREFIX)) return;
+    pendingOps = loadPendingOps();
+    updateSyncStatus();
+    retryPendingOps();
+  });
+}
 
 // 今天的日期（本地時區，非 UTC，避免半夜跨日算錯）
 function todayLocalStr(){
@@ -140,8 +176,7 @@ async function init(){
   }
   document.getElementById('meta').textContent =
     `更新 ${DATA.updated}｜${DATA.counts.exported} 篇`;
-  await loadActionsFromServer();   // D1 = 跨瀏覽器真實來源
-  retryPendingOps();
+  await syncActionsOnLoad();       // D1 snapshot → local retry，避免舊 snapshot 回蓋成功 POST
   // seenAtLoad 補種：離線 / D1 失敗時也能用 localStorage 的 seen 來隱藏
   for(const [id,a] of Object.entries(actions)) if(a && a.seen) seenAtLoad.add(id);
   buildTopics();
