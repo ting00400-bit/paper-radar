@@ -83,6 +83,41 @@ def test_explanations_and_profile_merge_duplicate_human_labels():
     liked_labels = [row['feature'] for row in profile['top_liked']]
     assert len(why_labels) == len(set(why_labels))
     assert len(liked_labels) == len(set(liked_labels))
+    assert max(abs(row['weight']) for row in ranked[0]['why']) <= 2
+    assert max(abs(row['weight']) for row in profile['top_liked']) <= 2
+
+
+def test_single_event_strength_order_survives_score_normalization():
+    papers = [
+        paper('a', 'implant', 'peri-implantitis', 4),
+        paper('b', 'implant', 'peri-implantitis', 4),
+        paper('c', 'ortho', 'aligner', 4),
+    ]
+
+    def score(action=None):
+        data = snapshot([event('a', action)]) if action else snapshot()
+        return by_id(train_prpm.train_model(papers, data, now=NOW)[0])['b']['score']
+
+    baseline = score()
+    negative_impacts = [baseline - score(name) for name in ('seen_only', 'vote_mid', 'vote_down')]
+    positive_impacts = [score(name) - baseline for name in ('vote_up', 'content_on')]
+
+    assert 0 < negative_impacts[0] < negative_impacts[1] < negative_impacts[2]
+    assert 0 < positive_impacts[0] < positive_impacts[1]
+
+
+def test_seen_only_survives_distribution_across_many_features():
+    rich_tags = [f'tag{i}' for i in range(20)]
+    papers = [
+        {**paper('a', 'implant', 'base'), 'tags': rich_tags},
+        {**paper('b', 'implant', 'base'), 'tags': rich_tags},
+        paper('c', 'ortho', 'aligner'),
+    ]
+    baseline = by_id(train_prpm.train_model(papers, snapshot(), now=NOW)[0])['b']['score']
+    with_seen = by_id(train_prpm.train_model(
+        papers, snapshot([event('a', 'seen_only')]), now=NOW)[0])['b']['score']
+
+    assert with_seen < baseline
 
 
 def test_actions_snapshot_backfills_only_missing_event_signals():
@@ -147,6 +182,21 @@ def test_pdf_upload_counts_as_recently_seen_for_explore():
 
     assert train_prpm.recent_seen_items(
         data, train_prpm.training_events(data), now=NOW) == {'p3'}
+
+
+def test_many_historical_signals_do_not_saturate_the_entire_feed():
+    papers = [
+        paper(f'p{i}', f'g{i % 4}', f'tag{i}', score=4, source=f'J{i % 5}')
+        for i in range(20)
+    ]
+    actions = [{
+        'item_id': f'p{i}', 'content': 1, 'deepread': 0, 'star': 0,
+        'vote': None, 'seen': 1, 'pdf_key': None, 'updated': NOW.isoformat(),
+    } for i in range(20)]
+
+    ranked, _ = train_prpm.train_model(papers, snapshot(actions=actions), now=NOW)
+
+    assert sum(row['score'] == 12 for row in ranked) < len(ranked)
 
 
 def test_invalid_input_does_not_overwrite_serving_files(tmp_path):

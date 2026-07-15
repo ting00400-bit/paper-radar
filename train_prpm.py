@@ -4,7 +4,6 @@
 import argparse
 import copy
 import json
-import math
 import re
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
@@ -137,10 +136,17 @@ def _merge_labels(rows):
     return list(merged.items())
 
 
+def _cap_labeled(rows, limit=2.0):
+    rows = list(rows)
+    largest = max((abs(value) for _, value in rows), default=0.0)
+    scale = max(1.0, largest / limit)
+    return [(label, value / scale) for label, value in rows]
+
+
 def _profile_features(weights):
-    allowed = _merge_labels(
+    allowed = _cap_labeled(_merge_labels(
         (feature, value) for feature, value in weights.items()
-        if feature.startswith(('tag:', 'group:', 'journal:')))
+        if feature.startswith(('tag:', 'group:', 'journal:'))))
     liked = sorted((x for x in allowed if x[1] > 0), key=lambda x: (-x[1], x[0]))[:10]
     avoided = sorted((x for x in allowed if x[1] < 0), key=lambda x: (x[1], x[0]))[:10]
     encode = lambda rows: [
@@ -172,19 +178,32 @@ def train_model(papers, snapshot, *, now=None):
         learned = [feature for feature in features[item_id] if feature in discriminative]
         feature_count = max(1, len(learned))
         for feature in learned:
-            feature_weights[feature] += signal / math.sqrt(feature_count)
+            feature_weights[feature] += signal / feature_count
 
+    contributions_by_id = {}
+    preferences = {}
     for paper in items:
         item_id = paper.get('item_id')
         kw_score = paper.get('kw_score', paper.get('score', 0))
         kw_score = float(kw_score) if isinstance(kw_score, (int, float)) else 0.0
         paper['kw_score'] = kw_score
         contributions = [(feature, feature_weights[feature]) for feature in features.get(item_id, [])
-                         if abs(feature_weights[feature]) >= 0.01]
-        preference = sum(value for _, value in contributions)
-        paper['score'] = round(max(0.0, min(12.0, kw_score * 0.55 + preference * 1.6)), 1)
+                         if feature_weights[feature]]
+        contributions_by_id[item_id] = contributions
+        preferences[item_id] = sum(value for _, value in contributions)
+
+    preference_scale = max(
+        2.5, max((abs(value) for value in preferences.values()), default=0.0))
+    for paper in items:
+        item_id = paper.get('item_id')
+        boost = preferences.get(item_id, 0.0) / preference_scale * 4.0
+        paper['score'] = round(max(0.0, min(12.0, paper['kw_score'] * 0.55 + boost)), 1)
+        visible = [
+            row for row in contributions_by_id.get(item_id, []) if abs(row[1]) >= 0.01
+        ]
         strongest = sorted(
-            _merge_labels(contributions), key=lambda row: (-abs(row[1]), row[0]))[:3]
+            _cap_labeled(_merge_labels(visible)),
+            key=lambda row: (-abs(row[1]), row[0]))[:3]
         paper['why'] = [
             {'label': label, 'weight': round(value, 2)} for label, value in strongest]
         paper['explore'] = False
