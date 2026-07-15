@@ -4,10 +4,13 @@
 const LS_ACT = 'pr_actions_v1';     // 各篇動作 {item_id:{vote,star,zotero,deepread}}
 const LS_TOPIC = 'pr_topics_v1';    // 主題開關 {group:bool}
 const LS_FILT = 'pr_filters_v1';    // {badge,sort,search,tab}
+const LS_PENDING = 'pr_pending_ops_v1'; // 尚未成功寫入 D1 的 idempotent 設定操作
 const API = '/api/action';          // Worker(step 4)；失敗則純本地
 
 let DATA = null;
 let actions = load(LS_ACT, {});
+let pendingOps = load(LS_PENDING, {});
+const inFlight = {};
 let topics = load(LS_TOPIC, null);
 let filt = load(LS_FILT, {badge:'all', sort:'score', search:'', tab:'unseen'});
 // 一次性遷移：舊版用 showSeen checkbox，映射到 tab 後不再讀寫 showSeen
@@ -44,6 +47,50 @@ function ic(name){
   return `<svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name]}</svg>`;
 }
 
+const opId = op => `${op.item_id}\u0000${op.key}`;
+
+function updateSyncStatus(){
+  const el = document.getElementById('syncStatus');
+  if(!el) return;
+  const n = Object.keys(pendingOps).length;
+  el.textContent = n ? `尚有 ${n} 筆未同步` : '';
+  el.classList.toggle('hidden', !n);
+}
+
+function queueOp(op){
+  pendingOps[opId(op)] = op;
+  save(LS_PENDING, pendingOps);
+  updateSyncStatus();
+}
+
+function sendQueued(id){
+  if(inFlight[id]) return inFlight[id];
+  inFlight[id] = (async () => {
+    while(pendingOps[id]){
+      const op = pendingOps[id];
+      let response;
+      try{
+        response = await fetch(API, {method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify(op)});
+      }catch{
+        return false;
+      }
+      if(!response.ok) return false;
+      if(JSON.stringify(pendingOps[id]) === JSON.stringify(op)) delete pendingOps[id];
+      save(LS_PENDING, pendingOps);
+      updateSyncStatus();
+    }
+    return true;
+  })().finally(() => { delete inFlight[id]; });
+  return inFlight[id];
+}
+
+async function retryPendingOps(){
+  await Promise.all(Object.keys(pendingOps).map(sendQueued));
+}
+
+window.addEventListener('online', retryPendingOps);
+
 // 從 D1 載入動作狀態（跨瀏覽器真實來源；失敗則沿用 localStorage）
 async function loadActionsFromServer(){
   try{
@@ -62,6 +109,13 @@ async function loadActionsFromServer(){
       if(a.updated) e.updated = a.updated;   // 最後互動時間（已看 tab「看過時間」排序用）
       if(Object.keys(e).length) map[a.item_id] = e;
     }
+    for(const op of Object.values(pendingOps)){
+      const e = map[op.item_id] || (map[op.item_id] = {});
+      if(op.val) e[op.key] = op.val;
+      else delete e[op.key];
+      e.updated = op.updated;
+      if(op.key === 'seen') op.val ? seenAtLoad.add(op.item_id) : seenAtLoad.delete(op.item_id);
+    }
     actions = map;
     save(LS_ACT, actions);
   }catch(e){ /* keep localStorage */ }
@@ -76,6 +130,7 @@ function todayLocalStr(){
 }
 
 async function init(){
+  updateSyncStatus();
   const r = await fetch('papers.json?_=' + Date.now());
   DATA = await r.json();
   if(topics===null){ // 首次：用 config default_on
@@ -86,6 +141,7 @@ async function init(){
   document.getElementById('meta').textContent =
     `更新 ${DATA.updated}｜${DATA.counts.exported} 篇`;
   await loadActionsFromServer();   // D1 = 跨瀏覽器真實來源
+  retryPendingOps();
   // seenAtLoad 補種：離線 / D1 失敗時也能用 localStorage 的 seen 來隱藏
   for(const [id,a] of Object.entries(actions)) if(a && a.seen) seenAtLoad.add(id);
   buildTopics();
@@ -260,7 +316,7 @@ function render(){
   const ps = base.filter(passSeen);
   const upd = p => (actions[p.item_id]||{}).updated || '';
   ps.sort(filt.sort==='date'
-    ? (a,b)=> (b.pub_date||b.first_seen).localeCompare(a.pub_date||a.first_seen)
+    ? (a,b)=> dateValue(b).localeCompare(dateValue(a))
     : filt.sort==='seenat'
     ? (a,b)=> upd(b).localeCompare(upd(a)) || b.score - a.score
     : (a,b)=> b.score - a.score);
@@ -268,6 +324,8 @@ function render(){
   for(const p of ps) list.appendChild(card(p));
   document.getElementById('count').textContent = `顯示 ${ps.length} 篇`;
 }
+
+const dateValue = p => p.pub_date_sort || p.first_seen || '';
 
 function card(p){
   const a = actions[p.item_id] || {};
@@ -386,11 +444,12 @@ function markSeen(p){
 function toggleAct(p, key){ toggle(p, key); markSeen(p); }
 function persist(p, key, val){
   // 本地也 bump updated（與 Worker 同格式）：剛按的卡在「看過時間」排序才會置頂，不用等重整回填
-  const a = actions[p.item_id]; if(a) a.updated = new Date().toISOString();
+  const updated = new Date().toISOString();
+  const a = actions[p.item_id]; if(a) a.updated = updated;
   save(LS_ACT, actions);
-  // best-effort 推 Worker(step 4)；失敗純本地保留，/paper-sync 之後可補
-  fetch(API, {method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({item_id:p.item_id, doi:p.doi, title:p.title, key, val})}).catch(()=>{});
+  const op = {item_id:p.item_id, doi:p.doi, title:p.title, key, val, updated};
+  queueOp(op);
+  return sendQueued(opId(op));
 }
 // per-card 全文上傳（綁該篇 item_id；給機構沒訂、非 OA、你手上有 PDF 的論文）
 function uploadForPaper(p, btn){

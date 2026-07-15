@@ -22,6 +22,9 @@ SCRIPT_DIR = Path(__file__).parent
 UA = "Mozilla/5.0 (paper-radar)"
 EUTILS = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
 DOI_RE = re.compile(r"10\.\d{4,9}/[-._;()/:A-Za-z0-9]+")
+MONTHS = {name: f"{month:02d}" for month, name in enumerate(
+    ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"), 1
+)}
 
 
 # --------------------------------------------------------------------------- #
@@ -56,6 +59,22 @@ def item_id(doi, title, source):
         return "doi:" + doi.lower()
     raw = (title.strip().lower() + "|" + source.strip().lower()).encode("utf-8")
     return "h:" + hashlib.md5(raw).hexdigest()[:12]
+
+
+def pub_date_sort(value):
+    """將 PubMed 的 YYYY[-Mon[-DD]] 日期轉成可排序 ISO 日期。"""
+    match = re.fullmatch(
+        r"(\d{4})(?:-([A-Za-z]{3}|\d{2})(?:-(\d{1,2}))?)?",
+        (value or "").strip(),
+    )
+    if not match:
+        return ""
+    year, month, day = match.groups()
+    month = MONTHS.get((month or "").title(), month or "01")
+    try:
+        return date(int(year), int(month), int(day or "1")).isoformat()
+    except ValueError:
+        return ""
 
 
 # --------------------------------------------------------------------------- #
@@ -303,6 +322,7 @@ def main():
         if d["oa_status"] and d["oa_status"] != "closed" and not d["oa_pdf_url"]:
             continue
         d["tags"] = json.loads(d["tags"] or "[]")
+        d["pub_date_sort"] = pub_date_sort(d["pub_date"])
         d["isNew"] = (date.fromisoformat(d["first_seen"]) - date.today()).days >= -new_days
         # OA 剛被機械重抓到（first_seen 以後才開放全文）→ 前端可單獨顯示「新開放」
         d["oaNew"] = bool(d["oa_first_date"]) and \

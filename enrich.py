@@ -15,6 +15,8 @@ from pathlib import Path
 import requests
 import yaml
 
+from fetch_and_score import pub_date_sort
+
 SCRIPT_DIR = Path(__file__).parent
 UA = "Mozilla/5.0 (paper-radar)"
 
@@ -96,6 +98,7 @@ def export_json(con, cfg, out):
         if d["oa_status"] and d["oa_status"] != "closed" and not d["oa_pdf_url"]:
             continue
         d["tags"] = json.loads(d["tags"] or "[]")
+        d["pub_date_sort"] = pub_date_sort(d["pub_date"])
         d["isNew"] = (date.fromisoformat(d["first_seen"]) - date.today()).days >= -new_days
         # OA 剛被機械重抓到（first_seen 以後才開放全文）→ 前端可單獨顯示「新開放」
         d["oaNew"] = bool(d["oa_first_date"]) and \
