@@ -23,11 +23,12 @@ ACTION_SQL = (
 
 
 def query_d1(sql, *, runner=subprocess.run):
+    npx = 'npx.cmd' if os.name == 'nt' else 'npx'
     proc = runner(
-        ['npx', '--yes', 'wrangler', 'd1', 'execute', D1_NAME, '--remote',
+        [npx, '--yes', 'wrangler', 'd1', 'execute', D1_NAME, '--remote',
          '--json', '--command', sql],
         cwd=SCRIPT_DIR, env=dict(os.environ), capture_output=True, text=True,
-        encoding='utf-8', shell=(os.name == 'nt'))
+        encoding='utf-8', shell=False)
     if proc.returncode != 0:
         raise RuntimeError('D1 action export failed')
     try:

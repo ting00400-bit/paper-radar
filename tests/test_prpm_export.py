@@ -1,4 +1,5 @@
 import json
+import os
 from types import SimpleNamespace
 
 import pytest
@@ -12,6 +13,7 @@ def wrangler_result(rows):
 
 def test_export_snapshot_writes_events_and_actions_atomically(tmp_path):
     destination = tmp_path / 'events.json'
+    calls = []
     outputs = iter([
         wrangler_result([{
             'id': 1, 'event_id': 'evt-one', 'item_id': 'doi:one',
@@ -25,7 +27,8 @@ def test_export_snapshot_writes_events_and_actions_atomically(tmp_path):
         }]),
     ])
 
-    def runner(*_args, **_kwargs):
+    def runner(*args, **kwargs):
+        calls.append((args, kwargs))
         return SimpleNamespace(returncode=0, stdout=next(outputs), stderr='')
 
     snapshot = export_action_log.export_snapshot(destination, runner=runner)
@@ -34,6 +37,8 @@ def test_export_snapshot_writes_events_and_actions_atomically(tmp_path):
     assert snapshot['events'][0]['event_id'] == 'evt-one'
     assert snapshot['events'][0]['ctx'] == {'rank': 2}
     assert snapshot['actions'][0]['content'] == 1
+    assert calls[0][0][0][0] == ('npx.cmd' if os.name == 'nt' else 'npx')
+    assert calls[0][1]['shell'] is False
     assert json.loads(destination.read_text(encoding='utf-8')) == snapshot
     assert not destination.with_suffix('.json.tmp').exists()
 
